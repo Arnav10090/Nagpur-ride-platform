@@ -1,0 +1,33 @@
+{
+  "name": "nagpur-rides-mobile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "devDependencies": {
+    "typescript": "~5.9.2",
+    "@types/react": "~19.2.0",
+    "@types/node": "^22.0.0",
+    "vitest": "^2.1.8",
+    "jsdom": "^25.0.1",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/dom": "^10.4.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@types/react-dom": "~19.2.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/rider/tsconfig.json && tsc -p apps/driver/tsconfig.json && tsc -p apps/admin/tsconfig.json",
+    "rider": "npm --workspace @rides/rider-app run start",
+    "driver": "npm --workspace @rides/driver-app run start",
+    "bundle": "npm --workspace @rides/rider-app run export:web && npm --workspace @rides/driver-app run export:web",
+    "build:admin": "npm --workspace @rides/admin-console run build"
+  },
+  "overrides": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

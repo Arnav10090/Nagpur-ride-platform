@@ -1,0 +1,5 @@
+{ "expo": { "name": "Nagpur Rides", "slug": "nagpur-rides-rider", "version": "0.1.0", "orientation": "portrait", "userInterfaceStyle": "light", "scheme": "nagpurrides",
+  "ios": { "bundleIdentifier": "com.example.nagpurrides.rider", "supportsTablet": false, "infoPlist": { "LSApplicationQueriesSchemes": ["upi", "gpay", "phonepe", "paytmmp"] } },
+  "android": { "package": "com.example.nagpurrides.rider", "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"] },
+  "plugins": [["expo-location", { "locationWhenInUsePermission": "Nagpur Rides uses your location to set your pickup point." }], "expo-secure-store"],
+  "web": { "bundler": "metro", "output": "single" } } }

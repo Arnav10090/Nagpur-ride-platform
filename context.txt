@@ -1,0 +1,1766 @@
+================================================================================
+NAGPUR RIDE-HAILING PLATFORM  --  PROJECT CONTEXT FILE
+================================================================================
+Purpose : A single, self-contained briefing on this project. A new engineer, a
+          product owner, or another AI assistant should be able to read ONLY
+          this file and understand: what the project is, what exists, how it is
+          built, how it was verified, what is missing, what must be decided, and
+          what a genuinely successful Uber-style product looks like.
+Written  : 24 October 2026 (end of the build conversation this file summarises)
+Project  : "nagpur-ride-platform" (delivered as nagpur-ride-platform.zip)
+Source   : Product Requirements Document v2.0 (18 Oct 2026),
+           file "Nagpur_Ride_Hailing_Platform_PRD.docx"
+
+HOW TO READ THIS FILE
+  Section 1  : one-page honest summary and maturity verdict
+  Section 2  : what the PRD requires (the contract)
+  Section 3  : build history, in order
+  Sections 4-8   : repository, architecture, every implemented feature, API, config
+  Section 9  : testing and verification (what is proven, what is NOT)
+  Sections 10-11 : requirement-by-requirement status and deviations from the PRD
+  Sections 12-14 : everything left to do, risks/gotchas, decisions needed from you
+  Section 15 : what a successful Uber clone should look like (product + business)
+  Section 16 : recommended next steps
+  Sections 17-19 : run cheat-sheet, glossary, environment notes
+
+CONVENTIONS USED
+  DONE      implemented AND covered by automated tests in this repo
+  PARTIAL   some of the requirement exists; the gap is stated
+  NOT DONE  not started
+  "Verified" always names the kind of evidence. Test environments are NOT
+  production: see section 9 for exactly what was and was not exercised.
+
+IMPORTANT CAVEAT ABOUT FACTS OUTSIDE THIS REPO
+  Statements about Indian regulation, provider capabilities, market norms and
+  industry benchmarks (mainly Section 15) come from general knowledge, not from
+  a live source, and may be out of date. Treat them as prompts for verification
+  with counsel / providers, not as authoritative facts.
+
+
+================================================================================
+1. EXECUTIVE SUMMARY AND HONEST MATURITY VERDICT
+================================================================================
+WHAT THIS IS
+  A ride-hailing platform (Uber-style) for a controlled pilot in Nagpur,
+  Maharashtra, India, with UPI and cash payments and SEQUENTIAL driver offers
+  (one driver at a time, not broadcast). It consists of:
+    1. A backend API (NestJS + PostgreSQL/PostGIS + Socket.IO)
+    2. A rider mobile app (Expo / React Native)
+    3. A driver mobile app (Expo / React Native)
+    4. A staff web console (admin dashboard, React + Vite, served by the API)
+
+WHAT EXISTS (high level)
+  - Complete ride lifecycle on the server: quote -> book -> sequential dispatch
+    -> accept -> en route -> arrive -> start -> complete, plus cancel/expire.
+  - Database-enforced invariants (one active assignment per ride and per driver,
+    legal state transitions only, balanced append-only ledger, etc.).
+  - Phone-OTP auth with rotating sessions and theft detection.
+  - Realtime delivery through a transactional outbox + Socket.IO.
+  - Cash ride accounting and UPI payments (behind a provider interface, using a
+    FAKE provider), signed webhooks, duplicate-payment refunds, manual refunds,
+    reconciliation with findings.
+  - Rider and driver apps that complete a full trip against the real server.
+  - Staff console: driver approvals, ride search + dispute view, refunds,
+    reconciliation, audit log, with role-based access and masked phone numbers.
+
+WHAT DOES NOT EXIST (the big gaps, detail in section 12)
+  - No real payment gateway, SMS/OTP provider, maps/routing/geocoding, or push
+    notifications (all faked or absent).
+  - Apps have never been run on a physical device or emulator.
+  - Staff console has never been opened in a real browser.
+  - No ratings, support tickets, safety/SOS, trip sharing, driver documents,
+    earnings/payout screens, pricing admin, cancellation fees, rate limiting,
+    CI/CD, containers, monitoring, OpenAPI spec, Redis, load/security testing.
+  - No legal/compliance work; fare rates, commission and the service-zone
+    boundary are PLACEHOLDERS awaiting your decisions.
+
+MATURITY VERDICT (honest)
+  This is a strong, well-tested FOUNDATION and a working vertical slice, not a
+  launchable product. In PRD terms it sits roughly at "end of M3, with the core of
+  M4 started". It is suitable for: internal demos, developer onboarding, and as
+  the base for the remaining work. It is NOT suitable for: real riders, real
+  drivers, real money, or any public launch. Reasons: unverified on devices,
+  fake payment/OTP/maps providers, missing safety and support systems, no
+  operations/monitoring stack, no legal review. The PRD itself says "Do not
+  launch live payments or open public registration merely because the
+  application screens are complete."
+
+TEST STATUS AT THE TIME OF WRITING (see section 9)
+  - Backend: 165 tests pass against real PostgreSQL 16 + PostGIS.
+  - Mobile workspace (client logic, rider/driver UI, staff console, workspace
+    guard): 39 tests pass. All three UIs also build with Metro/Vite.
+  - One mobile client test has shown rare timing flakiness under load (passes
+    when run alone, repeatedly). Not root-caused.
+
+
+================================================================================
+2. THE PRD: WHAT THE CONTRACT REQUIRES
+================================================================================
+(Summarised from the PRD. The PRD remains the authority; this is a faithful
+digest so this file stands alone.)
+
+2.1 MANDATE
+  "Build a real, production-oriented ride-hailing platform for an initial
+  controlled launch in Nagpur." Three independently usable interfaces: rider app,
+  driver app, admin web dashboard. Real APIs, persistent data, a real maps
+  provider, a real UPI integration, operationally verified workflows. Mock data
+  only in isolated tests/dev fixtures. "This is not a UI-only clone": critical
+  workflows need server-side authorization, durable state, idempotency, failure
+  handling, auditability and automated tests.
+
+2.2 CONFIRMED BASELINE (PRD document-control table)
+  - Geography: Nagpur, Maharashtra, India.   - Payments: UPI and cash.
+  - Dispatch: sequential driver offers.      - Rollout: controlled pilot, then gradual.
+  - Mobile: React Native + Expo + TypeScript.
+  - Backend: NestJS modular monolith, PostgreSQL/PostGIS, Redis, Socket.IO.
+
+2.3 GOALS
+  Full ride lifecycle in-app; verified drivers receive/accept/complete rides;
+  server-side fares and transition validation; authorized driver location + ETA
+  with freshness checks; idempotent UPI processing with provider reconciliation
+  and separate cash tracking; ops tools for exceptions, support and safety;
+  security, observability, testing, deployment discipline from release 1.
+
+2.4 NON-GOALS (initial release)
+  Food delivery, freight, rentals, subscriptions, corporate travel; autonomous
+  vehicles / multi-country; ML dynamic pricing as a launch requirement;
+  guaranteed driver availability or matching.
+
+2.5 ROLES
+  Rider; Driver; Support agent (assigned cases, permitted trip details);
+  Operations admin (driver verification, live trips, zones); Finance admin
+  (payments, refunds, ledger, reconciliation, payouts); Super admin (roles and
+  platform settings, strictly audited).
+  Principle: authorization and ownership enforced in the BACKEND; hiding a
+  frontend control is not access control.
+
+2.6 TECHNOLOGY DECISIONS (PRD section 3)
+  Mobile: RN + Expo + TS; React Navigation, TanStack Query, Zustand, React Hook
+    Form, Zod; Expo development builds (not just Expo Go).
+  Backend: Node + TS + NestJS (REST, Socket.IO, DTO validation, RBAC).
+  DB: PostgreSQL + PostGIS = source of truth. ORM: Prisma, with hand-written SQL
+    migrations for partial indexes/constraints.
+  Redis: ephemeral state (presence, candidate lookup, short-lived offers, rate
+    limiting) -- explicitly "not the sole correctness boundary".
+  Async: transactional outbox + workers.  External: maps/routing, OTP/SMS, push,
+    payment provider behind adapters with timeouts/retries.
+  Ops: Docker, CI/CD, monitoring, managed services, backups, secrets, health
+    checks, alerts, rollback and recovery runbooks.
+  Principles: modular monolith; Postgres authoritative; Socket.IO transports but
+    does not replace durable commands; critical events via outbox; integrations
+    behind interfaces; nothing trusted merely because the client says it
+    succeeded.
+
+2.7 REPOSITORY SHAPE THE PRD ASKS FOR
+  apps/{rider-mobile,driver-mobile,admin-web,api}, packages/{contracts,validation,
+  config,test-utilities}, prisma/, infra/{docker,deployment}, docs/{architecture,
+  api,security,runbooks}. Share DTOs/events/validation as versioned packages.
+  Separate env config + app identifiers for dev/staging/prod. No secrets in repo
+  or mobile bundles. (See section 11: this repo's layout differs.)
+
+2.8 FUNCTIONAL REQUIREMENT IDS (full status table in section 10)
+  Rider RDR-01..10: phone auth; pickup selection (GPS/search/pin); fare quote;
+    book (idempotent); track driver; cancel (with fee per policy); pay; history;
+    rate/report; safety (emergency, share trip, incident).
+  Driver DRV-01..10: onboarding (no trips until verified); availability checked
+    server-side; location (authenticated, timestamped, validated, RATE-LIMITED);
+    offer with expiry; accept (one winner, expired fails); arrival (valid trip);
+    start trip (assigned driver, pickup checks); complete (once, retry-safe);
+    earnings (gross, commission, adjustments, payable); offline.
+  Admin ADM-01..08: driver review w/ reason; live ops filters (state, zone,
+    driver, age); versioned pricing config; reconciliation; refunds (permissioned,
+    idempotent, audited); safety incidents (severity, restricted, escalation);
+    suspensions/reinstatements; audit trail (actor, target, reason, time,
+    before/after).
+  Product-wide: backend owns business decisions; every critical flow has loading,
+    empty, error, offline and recovery states; state changes tolerate retries;
+    P0 features work against real persistence in staging; admin endpoints cannot
+    bypass domain rules or set arbitrary trip status.
+
+2.9 RIDE STATE MACHINE (PRD section 6)
+  REQUESTED -> SEARCHING -> DRIVER_ASSIGNED -> DRIVER_ARRIVING -> DRIVER_ARRIVED
+  -> IN_PROGRESS -> COMPLETED; terminal exceptions CANCELLED and EXPIRED
+  (SEARCHING -> EXPIRED on deadline). Payment is a SEPARATE lifecycle.
+  Rules: explicit domain commands (never raw status from clients); every
+  transition validates state, actor, timestamps, preconditions; at most one active
+  assignment per ride and no conflicting active trips per driver; transition +
+  assignment + events + outbox commit transactionally; idempotent repeats;
+  conflicts return stable 409; completion and payment settlement are separate
+  (provider downtime must not roll back a completed trip).
+
+2.10 SEQUENTIAL DISPATCH (PRD section 7)
+  Persist ride and enqueue dispatch; spatial-index candidate lookup then filter by
+  zone, vehicle category, approval, availability, freshness, no active trip; rank
+  by predicted pickup ETA with deterministic tie-break; offer to first; offer
+  active for configurable time (proposed 15 s); on reject/timeout/unavailable,
+  invalidate and try next; optional radius expansion by zone policy; exhaustion or
+  overall deadline -> EXPIRED and tell the rider. Offer fields: id, rideId,
+  driverId, sequenceNumber, status (PENDING/ACCEPTED/REJECTED/EXPIRED/
+  INVALIDATED), createdAt/expiresAt, respondedAt, dispatchAttemptId.
+  Invariants: exactly one accepted assignment per ride; stale notifications cannot
+  revive expired offers; DB constraints + transactional checks (Redis locks alone
+  insufficient); do not use straight-line distance as ETA when routing exists;
+  record metrics (candidate count, delivery, response time, acceptance, match
+  latency, radius expansion, no-driver rate); ranking must not use protected
+  personal characteristics.
+
+2.11 DATA MODEL RULES (PRD section 8)
+  Entities: User, Driver, Vehicle, ServiceZone, PricingRule, FareQuote, Ride,
+  RideAssignment, RideOffer, Payment, LedgerEntry, AuditLog, OutboxEvent plus
+  sessions, driver documents, ride events, driver locations, refunds, payouts,
+  ratings, support tickets, safety incidents, notifications, idempotency records.
+  Rules: non-guessable IDs, UTC timestamps; integer minor units for money with
+  explicit currency (paise); FKs, uniqueness, indexes; GiST spatial indexes and
+  reviewed SQL for partial unique indexes; unique provider event IDs and scoped
+  idempotency keys; immutable ledger with compensating entries; retention/
+  anonymization/deletion rules that respect legal recordkeeping.
+
+2.12 API AND EVENT CONTRACTS
+  Prefix /api/v1. Rider/booking, driver, payments and admin endpoint lists are in
+  PRD sections 9.1-9.3 (compared with what exists in section 7/11 here). Success
+  envelope {data, meta{requestId}}; error envelope {error{code,message,retryable},
+  meta{requestId}}. A full OpenAPI spec is required "before implementation".
+  Realtime (PRD section 10): ride.status.changed, ride.offer.created,
+  ride.offer.invalidated, ride.assigned, driver.location.updated,
+  payment.status.changed, support.case.updated. Every event has event ID, schema
+  version, server timestamp (+ aggregate state version where relevant);
+  authenticate sockets and authorize every room; critical events via outbox with
+  consumer dedupe; on reconnect fetch the REST snapshot, apply only newer events,
+  refetch on version gap; clients can never broadcast trusted events.
+
+2.13 PAYMENTS (PRD section 11)
+  Payment states: NOT_REQUIRED, PENDING, REQUIRES_ACTION, AUTHORIZED,
+  COLLECTION_PENDING, SUCCEEDED, FAILED, CANCELLED, PARTIALLY_REFUNDED, REFUNDED.
+  UPI: create payment op, initiate provider flow, show provider action, verify by
+  authenticated webhook or verification API, record idempotently, update ledger,
+  reconcile; "returning from a UPI app is not proof of payment".
+  Cash: method CASH; on completion record final fare and a cash-collection
+  obligation; DRIVER CONFIRMS COLLECTION (recorded separately from earnings and
+  commission); reconcile cash collected, commission owed, outstanding driver
+  balance; driver confirmation is operational, not proof.
+  Ledger: double-entry; illustrative INR 200 cash ride with INR 30 commission =
+  DR rider cash obligation 200 / CR driver payable 170 / CR commission 30; never
+  a mutable driver.balance as truth; one authoritative final-fare snapshot; no
+  duplicate financial effects; provider event IDs unique per provider and an older
+  event cannot overwrite verified success; append-only with compensating entries;
+  cash collection, provider settlement, platform revenue and driver payable are
+  separate concepts; choose the UPI provider only after validating merchant
+  onboarding, flows, webhooks, refunds, settlement reports.
+
+2.14 LOCATION / MAPS / EXPO (PRD section 12)
+  Location payload {latitude, longitude, accuracyMeters, recordedAt, sequence}.
+  Backend validates coordinates, accuracy, timestamp, session, frequency; server
+  receipt time decides staleness; out-of-order rejected; spatial indexes;
+  routing-based pickup ETA when available; offline/suspended drivers not
+  eligible; stale must not appear fresh. Expo: development builds; test
+  foreground/background permissions, screen lock, app kill, battery
+  optimisation, GPS loss, data loss on PHYSICAL ANDROID devices; do not assume
+  continuous background GPS; stop claiming availability if freshness cannot be
+  kept. Service zone: stable ID, PostGIS boundary, status, vehicle categories,
+  pricing versions, matching radius/deadlines, timezone Asia/Kolkata,
+  eligibility rules, owner, approved boundary + hours before pilot, no hard-coded
+  city logic in clients.
+
+2.15 SECURITY / PRIVACY (PRD section 13)
+  Access matrix (rider/driver/support/admin) for profile, own trip, others'
+  trips, driver documents, pricing, refunds, safety incidents, audit logs.
+  Mandatory: OTP expiry/replay prevention/throttling/abuse detection; short-lived
+  credentials + revocable sessions + secure mobile storage; server-side object
+  ownership checks; privileged-admin MFA and least privilege; verified webhook
+  signatures + replay protection; secrets manager, encrypted connections,
+  restricted DB credentials; redaction (no OTPs/tokens/payment credentials in
+  logs); restricted document storage and privacy-aware location sharing; tested
+  account deletion and data-access workflows consistent with retention duties.
+  India: legal review of data protection, consumer, motor-vehicle/aggregator, tax
+  and payments obligations; do not claim compliance until assessed and evidenced.
+
+2.16 NON-FUNCTIONAL TARGETS (PRD section 14)
+  Core API p95 < 300 ms (excl. providers); booking persistence p95 < 2 s; offer
+  publication p95 < 2 s; match time p50/p95 measured (proposed p95 < 30 s when
+  drivers exist); location delivery p95 within 3 s; 99.9% monthly availability for
+  core booking API (after production readiness); ZERO duplicate active
+  assignments under defined concurrency/failure tests; ZERO unexplained ledger
+  imbalance; defined+tested RPO/RTO; no unresolved critical/high security
+  findings; crash-free sessions tracked per app. Monitoring: technical dashboards
+  (API, DB, Redis, sockets, workers/outbox backlog, provider errors) and business
+  dashboards (bookings, availability, offers/ride, acceptance, cancellation,
+  completion, cash/UPI discrepancies, safety/support times); request/correlation
+  IDs on every request and job; logs must not expose unnecessary precise
+  location or credentials.
+
+2.17 TESTING AND RELEASE (PRD section 15)
+  Suites: domain unit; API integration; DB concurrency; dispatch integration;
+  payment integration; realtime integration; mobile E2E; security (IDOR,
+  privilege escalation, replay, rate-limit bypass, webhook forgery); failure
+  injection (Redis/DB interruption, provider timeout, worker restart); load;
+  recovery (restore, outbox recovery, rollback).
+  Mandatory acceptance scenarios:
+   AC-01 two drivers accept one ride -> exactly one assignment, other gets conflict
+   AC-02 expired offer accepted      -> rejected, no assignment
+   AC-03 duplicate booking           -> one logical booking per idempotency key
+   AC-04 invalid trip transition     -> structured conflict, DB unchanged
+   AC-05 forged UPI success          -> client callback alone cannot settle payment
+   AC-06 duplicate payment webhook   -> at most one financial effect per event
+   AC-07 cash collection retry       -> no duplicate collection/commission entries
+   AC-08 unauthorized trip access    -> other users cannot read trip/location
+   AC-09 stale GPS                   -> driver excluded from matching
+   AC-10 reconnect after network loss-> authoritative state restored, stale ignored
+   AC-11 driver goes offline         -> no new offer assigned after offline commits
+   AC-12 DB/worker restart           -> bookings survive; outbox resumes, no duplicates
+  Quality gates: critical domain+concurrency tests; no unresolved critical/high
+  security findings; no unobserved background job failures; migrations pass on
+  clean DB and previous schema; critical flows on supported physical Android
+  devices; payment sandbox covers success/failure/timeout/delayed+duplicate
+  callbacks/refunds; alerts exercised in staging; rollback/forward-fix tested.
+
+2.18 DEPLOYMENT, PILOT, ROADMAP, RISKS, DEFINITION OF DONE
+  Environments: Development (mock/sandbox payments), Staging (sandbox only),
+  Production (live UPI + cash). Config categories: NODE_ENV, DATABASE_URL,
+  REDIS_URL, ACCESS_TOKEN_SIGNING_KEY, REFRESH_TOKEN_SIGNING_KEY, OTP_PROVIDER_*,
+  MAPS_PROVIDER_*, PAYMENT_PROVIDER_*, PUSH_NOTIFICATION_*, OBJECT_STORAGE_*,
+  APP_PUBLIC_API_URL. CI/CD: locked installs, format/lint/typecheck, unit +
+  integration tests, dependency + static security scans, OpenAPI/contract
+  validation, versioned artifacts, reviewed backward-compatible migrations,
+  staging deploy + smoke/E2E/concurrency, approval, health-checked deploy with
+  rollback, post-deploy smoke + monitoring; Expo via EAS Build/Submit (native
+  permission changes need a new native build, not OTA).
+  Pilot phases: A internal validation (test accounts, UPI sandbox, real GPS,
+  zone/fare validation with ops, incident + backup-restore drills); B closed
+  operational pilot (bounded Nagpur zone, limited manually reviewed drivers,
+  invited riders, staffed monitoring, reconcile every trip); C gradual expansion
+  (measured cohorts, coverage only when availability/pickup acceptable). Go/no-go
+  gates: functional, dispatch, financial, security, reliability, operations,
+  legal/compliance, observability, rollback.
+  Roadmap: M1 Foundation; M2 Core rides; M3 Realtime; M4 Money + ops; M5 Pilot.
+  Risks: duplicate assignment, incorrect fares/financial discrepancies, GPS
+  inaccuracy, provider downtime, fraud, safety mishandling, privacy violations,
+  premature scaling, false readiness claims.
+  Decisions required (19.1): service boundary/areas/hours; vehicle categories and
+  documents; pricing, minimum fare, fees, cancellation, taxes, rounding; payment
+  provider and settlement; commission, cash reconciliation, payout model; staffing
+  for verification/support/incidents/finance; pilot cohort sizes and thresholds;
+  legal review (approvals, insurance, driver checks, emergency, retention).
+  Definition of done: states (loading/error/empty/offline/recovery), API+
+  validation+authz+persistence, server-side transitions/concurrency, tests,
+  retry/timeout/duplicate/provider-failure behaviour, logs/metrics/alerts,
+  contracts + ops docs, security/privacy checks, verified in staging, rollback.
+  PRD's FINAL ENGINEERING DIRECTION (build order): (1) DB invariants, authz, ride
+  state machine; (2) availability, sequential dispatch, real location; (3) apps,
+  tracking, recovery; (4) UPI, cash, ledger, reconciliation; (5) admin, safety,
+  support, monitoring; (6) controlled rollout after gates. "Most dangerous
+  shortcuts": Redis as the only assignment lock; trusting client payment
+  callbacks; treating cash confirmation as a reconciled financial record; letting
+  the frontend change trip status directly.
+
+
+================================================================================
+3. BUILD HISTORY (IN ORDER)
+================================================================================
+The project was built incrementally in one conversation. Each step ended with
+tests and a packaged zip. The user's instructions were short ("build this project
+end to end", "start with postgres", "go in that order", "build it with a fake
+provider", "build the rider and driver mobile apps", "proceed with admin
+dashboard", "give the zip", "create context.txt"). Decisions about scope and order
+were mostly the assistant's, following the PRD's "final engineering direction".
+
+STEP 1  Domain core (PRD M1/M2 core)
+  Ride state machine, fares in integer paise, sequential dispatch with atomic
+  accept, idempotent booking, outbox events, double-entry ledger (in-memory).
+STEP 2  NestJS HTTP layer
+  OTP auth + sessions, role/ownership guards (non-participants get 404), quotes,
+  rides, driver onboarding/availability/location/offers, admin review/suspend
+  with audit, cash ledger on completion. Two real bugs found and fixed: phone
+  normalizer stripped a leading "91" from valid numbers; ride commands leaked ride
+  state to non-participants (ownership is now checked BEFORE state).
+STEP 3  PostgreSQL (real Postgres 16 + PostGIS installed in the build sandbox)
+  Repository port with two implementations (memory, Postgres); SQL migrations
+  with DB-level invariants; same dispatch tests run on both. Lesson: an expiry
+  must COMMIT before the "expired" error is thrown (otherwise rollback undoes it).
+STEP 4  Persisted auth + outbox publisher + realtime
+  Users/OTP/sessions in Postgres (hashes only); refresh-token reuse revokes the
+  family; outbox worker (at-least-once, SKIP LOCKED, backoff, dead-letter);
+  Socket.IO LiveHub (clients only join their own room); location streaming to the
+  rider of an active ride only. Found: availableAt clock-skew bug (new events must
+  be due immediately).
+STEP 5  UPI payments behind a provider interface (FAKE provider)
+  Signed webhooks (HMAC over RAW body, timestamped), idempotent events, amount
+  check, duplicate-payment detection + auto refund, refunds (reserved up front),
+  reconciliation + findings, DB guards. 18-check live smoke test against a real
+  running server with a restart in the middle.
+STEP 6  Rider and driver mobile apps (Expo SDK 58 / RN 0.88 / React 19.3)
+  Shared client package, UI package, Expo platform adapters, both apps. API gained
+  role-aware ride views, history, active-ride resume, driver online flag. Found
+  and fixed: cancelling did not notify a driver holding a live offer. Verified by
+  Metro bundles for web/Android(Hermes)/iOS and by rendering real screens with
+  react-native-web driven like a person ("two phones" test).
+STEP 7  Staff console (admin dashboard)
+  Server endpoints (summary, drivers, rides, ride detail, reinstate, resolve
+  finding, role matrix, phone masking, audit-on-view, static hosting with strict
+  CSP) then the React/Vite console. Found and fixed: TWO COPIES OF REACT in the
+  mobile workspace (builds fine, crashes on device); now pinned to one with a
+  guard test.
+
+RECURRING LESSONS (worth remembering)
+  - Many "flaky" tests were really shared-state leaks between tests (a stale ride
+    re-offered to a later test's driver). Fix: a proper world reset between tests.
+  - Tests that click buttons must wait until the button is ENABLED (loading
+    buttons keep their accessible name but ignore clicks).
+  - Failed attempts that must persist (OTP attempt counts, expiry) have to be
+    committed, then the error thrown AFTER the transaction.
+
+
+================================================================================
+4. REPOSITORY LAYOUT (WHAT EACH PART IS)
+================================================================================
+nagpur-ride-platform/
+  package.json, tsconfig.json, vitest.config.ts   Backend workspace root
+  README.md                                       Backend + overall run notes
+  prisma/schema.prisma      REFERENCE ONLY (not used; SQL migrations are the
+                            truth). Prisma's engine host was unreachable from the
+                            build sandbox, so plain `pg` + SQL migrations are used.
+  apps/api/                 THE BACKEND
+    migrations/             0001_init, 0002_invariants, 0003_auth, 0004_payments,
+                            0005_admin  (forward-only SQL, applied by migrate.ts)
+    src/domain/             Pure business logic + ports (no HTTP, no SQL)
+      rideStateMachine.ts   Ride states, commands, guards (actor + ownership first)
+      fare.ts               Integer-paise fare calculation + commission
+      dispatch.ts           DispatchService: sequential offers, atomic accept,
+                            sweep, offline handling, commands
+      ports.ts              Repo + Db interfaces and all data types
+      memory.ts             In-memory Repo/Db (fast tests, dev without a DB)
+      ledger.ts             Double-entry ledger + posting helpers (cash/UPI/refund)
+      outbox.ts             OutboxWorker (at-least-once relay)
+      errors.ts             DomainError + stable error codes
+      payments/provider.ts  PaymentProvider interface (the gateway contract)
+      payments/fakeProvider.ts  Fake UPI gateway (signed webhooks, failure knobs)
+      payments/service.ts   PaymentService (capture, failure, retry, refunds,
+                            reconciliation)
+    src/pg/                 PgDb (Postgres Repo), migrate.ts, cli.ts
+    src/http/               NestJS layer
+      main.ts               Process entry (migrate, workers, realtime, console)
+      app.module.ts         DI wiring + global error filter
+      controllers.ts        Auth, Rides, Drivers, Payments, Webhooks, Dev, Admin
+      auth.ts               OTP + sessions + guard + @Roles
+      platform.ts           Application service: quotes, ride views, completion,
+                            admin ride detail; PILOT_RULE and zone box live here
+      realtime.ts           LiveHub (Socket.IO) + recipients() routing
+      workers.ts            Periodic jobs with overlap guard
+      adminUi.ts            Static hosting of the console + security headers
+      mask.ts               Phone masking
+    test/                   10 test files (see section 9)
+    scripts/                smoke.ts, smoke-pay.ts (live checks vs a running server)
+  mobile/                   THE CLIENTS (an npm workspace)
+    package.json            Workspace root; pins ONE react/react-dom (overrides)
+    packages/client/        Framework-free logic: ApiClient, RealtimeClient,
+                            RiderController, DriverController, utils, types
+    packages/ui/            React Native components + LoginFlow + hooks + theme
+    packages/expo-platform/ The ONLY device-specific code (SecureStore, location,
+                            Linking, API base URL)
+    apps/rider/             Rider app (Expo). RiderApp.tsx = testable component,
+                            App.tsx = real wiring, screens.tsx, places.ts
+    apps/driver/            Driver app (Expo). Same structure.
+    apps/admin/             Staff console (React + Vite). Built into dist/ and
+                            served by the API at /console.
+    test/workspace.test.ts  Guards against duplicate React/React-Native copies
+    README.md               Mobile-specific notes
+
+Dependency versions of note
+  Backend : NestJS 10.4, pg 8.23, socket.io 4.8, zod 4.6, TypeScript 5.6, vitest 2.1
+  Mobile  : Expo SDK 58 (~58.0.16), React Native 0.88.0, React 19.3.0 (exactly one
+            copy), react-native-web ~0.21.4, expo-location ~58, expo-secure-store
+            ~58, TypeScript ~5.9, vitest 2.1, jsdom 25, Testing Library 16, Vite 5
+
+
+================================================================================
+5. ARCHITECTURE AND KEY DESIGN DECISIONS
+================================================================================
+5.1 HEXAGONAL-ISH BACKEND
+  The business logic (domain/) depends only on two interfaces: Repo (all
+  persistence operations) and Db (tx(fn) giving a Repo inside a transaction).
+  Two implementations exist and the SAME tests run against both:
+    - Store (memory.ts): serialises transactions with a mutex; NO rollback on
+      error (so logic must not write-then-throw; see 5.3).
+    - PgDb (pg/PgDb.ts): one transaction per operation, row locks, retries on
+      deadlock/serialization failure (40P01/40001, up to 3 attempts), maps
+      constraint violations to stable domain errors.
+  Time and randomness are injected (now(), ids) so tests are deterministic.
+
+5.2 THE DATABASE IS THE FINAL REFEREE (PRD principle)
+  Application checks exist, but Postgres also refuses violations on its own:
+    - one ACTIVE assignment per ride AND per driver (partial unique indexes)
+    - one PENDING offer per ride; unique offer sequence per attempt; a driver is
+      never re-offered the same attempt
+    - ride transitions limited to a legal matrix by a trigger; terminal states
+      immutable; stateVersion must advance by exactly 1; final fare immutable
+    - ledger append-only, and each transaction must balance at COMMIT (deferred
+      constraint trigger)
+    - payments: amount immutable, refunded <= amount, REFUNDED is final, captured
+      payment must carry a provider reference, one payment per ride, unique
+      provider event ids, at most one automatic refund per duplicate capture
+    - audit log, payment events, findings: no deletes; resolved findings cannot be
+      reopened or edited
+    - user role/phone immutable by UPDATE
+  Tests fire raw SQL at these (bypassing the app) to prove it.
+
+5.3 CONCURRENCY MODEL
+  Lock order is always OFFER -> RIDE -> DRIVER so transactions cannot deadlock.
+  Accept re-checks offer status, expiry, ride status and driver availability
+  inside the lock. Idempotent booking uses INSERT ... ON CONFLICT on
+  (scope,key); a concurrent duplicate blocks on the unique index until the first
+  commits, then returns the same ride. A refused-because-expired accept COMMITS
+  the expiry (and offers the next driver) and only then throws OFFER_EXPIRED.
+  Going offline commits the flag first (so a later accept fails), then invalidates
+  outstanding offers one transaction at a time.
+
+5.4 TRANSACTIONAL OUTBOX
+  Every state change writes OutboxEvent rows in the SAME transaction. The
+  OutboxWorker claims due PENDING rows with FOR UPDATE SKIP LOCKED, publishes
+  (publish timeout 5 s), marks DELIVERED, or schedules a retry with exponential
+  backoff (base 1 s, doubling), dead-lettering as FAILED after 6 attempts.
+  Delivery is AT-LEAST-ONCE: consumers de-duplicate by eventId and ignore stale
+  stateVersion. New events have availableAt = NULL (due immediately) so clock
+  skew cannot hide them.
+
+5.5 REALTIME IS A HINT, REST IS TRUTH
+  Socket.IO (LiveHub) authenticates each handshake with an access token and puts
+  the socket ONLY in room "user:<id>"; clients cannot join or emit anything
+  trusted. Events tell the app "something changed"; apps refetch authoritative
+  REST state. On reconnect apps resync from REST, so missed events never matter.
+  Sockets are re-validated every 30 s (expired token or suspended user =>
+  disconnected).
+
+5.6 PAYMENTS ARE CONFIRMED ONLY BY THE SERVER SIDE OF THE PROVIDER
+  Webhook = authentication by HMAC over the RAW request body (constant-time),
+  5-minute timestamp tolerance, amount must equal what we asked for, event
+  de-duplicated by (provider, eventId) in the SAME transaction as its effect.
+  An event for a reference we cannot place yet is NOT recorded (503 RETRY_LATER)
+  so the provider's retry works. Ledger lines are written in the same transaction
+  as the status change, each with its own idempotent transaction id.
+
+5.7 MONEY
+  All money is integer paise. Fare rounding is half-up with integer maths.
+  Ledger accounts used: rider_cash_obligation:<ride>, driver_payable:<ride>,
+  platform_commission, provider_receivable, unapplied_receipts:<ride>.
+  Ledger transaction ids: cash-ride:<ride>, upi-capture:<payment>,
+  refund:<refund>, dup-capture:<providerRef>, dup-refund:<refund>. A refund is a
+  COMPENSATING entry (history is never edited).
+
+5.8 SECURITY POSTURE (as built)
+  OTP and refresh tokens stored only as SHA-256 hashes. Access token is a custom
+  HMAC-SHA256 signed token (NOT a standard JWT): base64url({id,role,exp}).sig,
+  15-minute life; the role is re-read from the database on EVERY request, never
+  trusted from the token. Non-participants get 404 (not 403) so ride existence
+  does not leak. Staff roles come only from a server-side allow-list.
+
+5.9 MOBILE ARCHITECTURE
+  All behaviour lives in framework-free controllers (RiderController,
+  DriverController) built on BaseController + a tiny observable Store. Screens
+  are thin React components reading controller state. Device specifics
+  (secure storage, GPS, opening URLs) sit behind a Platform interface; the real
+  app injects Expo implementations, tests inject fakes. This is why the real
+  server could be tested end to end without a phone.
+
+5.10 STAFF CONSOLE ARCHITECTURE
+  A separate React + Vite app, built to static files and served by the API at
+  /console on the SAME origin (no CORS, no cross-site tokens). Hash routing so no
+  server fallback is required beyond serving the shell.
+
+
+================================================================================
+6. IMPLEMENTED FEATURES, IN DETAIL
+================================================================================
+6.1 IDENTITY AND SESSIONS  (RDR-01, security controls)
+  - Phone OTP: 6-digit code, only its hash stored, 5-minute expiry, SINGLE USE
+    (concurrent verifies: exactly one wins), max 5 attempts (failed attempts are
+    committed so the limit is real), 30-second resend throttle per phone.
+  - Phone numbers normalised to +91XXXXXXXXXX (accepts "98765 43210",
+    "+91 98765 43210", "09876543210", "919876543210"; a valid number that merely
+    starts with 91, e.g. 9111111111, is preserved).
+  - Sessions: 15-minute access tokens; 30-day opaque refresh tokens (random 32
+    bytes, hashed at rest), ROTATED on every use; presenting an already-used
+    refresh token is treated as theft and REVOKES ALL of that user's sessions.
+  - Logout revokes the session. Suspension revokes sessions immediately.
+  - Staff roles (SUPPORT, OPS_ADMIN, FINANCE_ADMIN, SUPER_ADMIN) are granted ONLY
+    through the ADMIN_PHONES env allow-list at first sign-in; asking for a staff
+    role in the request is a validation error. Users sign up as RIDER or DRIVER.
+  - DEV ONLY OTP sender logs the code to the console; production start refuses to
+    run without a real OTP provider (see 12).
+
+6.2 RIDE LIFECYCLE  (PRD section 6)
+  - Commands: START_SEARCH, ASSIGN (system), DRIVER_EN_ROUTE, ARRIVE, START_TRIP,
+    COMPLETE (driver), CANCEL (rider/driver/system), EXPIRE (system). Clients never
+    send a status; they call named endpoints.
+  - Guards run ACTOR/OWNERSHIP FIRST, then state, so outsiders learn nothing.
+  - Terminal states: COMPLETED, CANCELLED, EXPIRED. Duplicate COMPLETE returns 409
+    and never double-finalises.
+  - Completion snapshots the final fare, frees the driver, ends the assignment
+    and (cash) posts the ledger or (UPI) creates the payment, all in ONE
+    transaction. Cancel withdraws pending offers AND notifies the offered driver.
+  - Each transition writes a RideEvent row (timeline) and outbox events.
+
+6.3 FARES, QUOTES AND THE ZONE  (RDR-03)
+  - POST /fare-quotes: validates pickup/destination are inside the zone, computes
+    distance as straight-line x 1.3 (road-factor ESTIMATE, no routing provider) and
+    time as distance / 6.9 m/s, then itemises base + distance + time with a
+    minimum-fare adjustment. Quote is owner-scoped and expires in 5 minutes.
+  - Booking takes only a quote id; the client NEVER supplies a fare. Final fare =
+    the quote total (no recalculation from the real trip).
+  - PLACEHOLDER pricing (PILOT_RULE v1): base 3000 paise, 1200 paise/km, 150
+    paise/min, minimum 5000 paise, cancellation fee 2000 paise (DEFINED BUT NEVER
+    USED), commission 1500 bps (15%).
+  - PLACEHOLDER zone: a lat/lng BOUNDING BOX 20.95-21.25 N, 78.95-79.25 E (not an
+    approved polygon). Zone id "nagpur-pilot".
+
+6.4 DRIVERS: ONBOARDING, AVAILABILITY, LOCATION  (DRV-01/02/03/10)
+  - Onboarding submits a vehicle category (default AUTO) and registration number
+    (normalised, UNIQUE in the database). Verification: PENDING -> staff
+    APPROVED/REJECTED with a recorded reason.
+  - Going online is refused server-side unless APPROVED. Going offline stops
+    matching and invalidates outstanding offers.
+  - Location ingestion: authenticated, must be online; validated lat/lng; accuracy
+    > 100 m rejected (REJECTED_FIX); outside the zone rejected; out-of-order
+    sequence ignored (OUT_OF_ORDER); recordedAt more than 60 s in the future is a
+    400. Staleness uses SERVER receipt time, not the device clock. Latest position
+    is stored in DriverPresence (PostGIS geography, GiST index). NO location
+    history is stored and there is NO server-side rate limit on update frequency.
+  - GET /drivers/me/status (verification + online), /drivers/me/active-ride
+    (resume after app kill), /drivers/me/offers (pending, unexpired).
+
+6.5 SEQUENTIAL DISPATCH  (PRD section 7)
+  - On booking: persist ride, move to SEARCHING, offer to the best candidate.
+  - Candidate filter: approved, online, no active ride, same zone, same vehicle
+    category, location fresh (<= 30 s), not already offered for this ride, within
+    10 km (ST_DWithin on the GiST index), nearest-first, limit 25; final ranking by
+    ETA function (straight-line fallback, injectable for a routing provider) with
+    driver-id tie-break (deterministic).
+  - Offer lifetime 15 s; max 5 offers per ride; reject/timeout/offline => next
+    candidate; exhaustion => ride EXPIRED. A 1-second sweep worker advances
+    timed-out offers; safe to run from several workers concurrently.
+  - NOT done: radius expansion, routing-based ETA, dispatch metrics, per-zone
+    configuration, driver-side ranking fairness controls.
+
+6.6 REALTIME AND OUTBOX  (PRD section 10)  -- see 5.4/5.5 and the event list in
+  section 7.4. Driver GPS is streamed ephemerally ONLY to the rider of the
+  driver's ACTIVE ride (assigned..in-progress) and stops at completion.
+
+6.7 PAYMENTS  (PRD section 11)
+  CASH
+    - At completion, ledger: DR rider_cash_obligation fare / CR driver_payable
+      (fare - commission) / CR platform_commission. Idempotent on cash-ride:<ride>.
+    - The rider app shows "pay cash to your driver"; the driver app shows "collect
+      INR X in cash".
+    - NOT done: driver "confirm collection" action, outstanding-balance tracking,
+      cash settlement/remittance, payouts (see 12).
+  UPI (behind PaymentProvider; FAKE provider only)
+    - Completion creates a PENDING payment in the same transaction; after commit
+      the provider payment is created (idempotent key paymentId:attempt); if the
+      gateway is down the payment stays PENDING and a 2-second worker retries.
+    - Rider receives a UPI deep link (intent) for the exact fare; the DRIVER never
+      sees it. Retry creates a NEW attempt (allowed after FAILED/CANCELLED or an
+      expired intent). Late payment on an older attempt is caught as a DUPLICATE
+      CAPTURE: booked as a liability (unapplied_receipts) and refunded
+      automatically; first capture wins.
+    - Webhook endpoint /api/v1/webhooks/payments/:provider (see 5.6). Outcomes:
+      CAPTURED, FAILED, DUPLICATE, IGNORED, AMOUNT_MISMATCH (held as a finding),
+      DUPLICATE_CAPTURE, REFUNDED, REFUND_FAILED, UNKNOWN_REFERENCE (503).
+    - Capture ledger: DR provider_receivable fare / CR driver_payable / CR
+      platform_commission. Written only after verified capture.
+  REFUNDS
+    - Finance/Super admin only, reason mandatory, audited. Amount is RESERVED up
+      front on the payment (refundedMinor) so concurrent requests cannot exceed
+      what was paid. Works for synchronous and asynchronous provider refunds; a
+      failed refund releases the reservation. Customer refund reverses the
+      driver/platform split proportionally (compensating entries).
+  RECONCILIATION
+    - Worker every 60 s and an admin "run now" button. Stale payments (> 120 s
+      non-final) are checked against the provider; lost success/failure webhooks
+      are repaired through the SAME idempotent path (synthetic event id
+      recon:<ref>:<status>). Findings recorded once per (kind, reference):
+      AMOUNT_MISMATCH, MISSING_AT_PROVIDER, ORPHAN_AT_PROVIDER, and
+      DUPLICATE_REFUND_FAILED. Finance resolves a finding once, with a note.
+  FAKE PROVIDER (for development/tests ONLY)
+    - HMAC-signed timestamped webhooks, idempotent create/refund, and knobs for
+      outage (failCreate), async/failing refunds, orphan payments. Production
+      start refuses to run until a real provider adapter exists.
+
+6.8 STAFF API AND CONSOLE  (ADM-01/04/05/07/08 + partial 02)
+  Role matrix (enforced by the server; the UI merely hides controls):
+    SUPPORT        read rides, read drivers; phone numbers MASKED
+    OPS_ADMIN      + approve/reject/suspend/reinstate drivers; FULL phones; audit
+    FINANCE_ADMIN  read rides (masked) + refunds, reconciliation, resolve; audit
+    SUPER_ADMIN    everything
+  Console pages (hash routed): Overview (counts), Drivers (filter/search, approve/
+  reject/suspend/reinstate with mandatory reason), Rides (search by id prefix,
+  phone ending, status), Ride detail (trip, timeline, payment + refunds, ledger
+  with a debits==credits check, refund form for finance), Reconciliation (run,
+  open/resolved findings, resolve with a note >= 5 chars), Audit log (latest 300).
+  Safeguards: every consequential action opens a form that REQUIRES a written
+  reason, then explicit confirm; viewing a ride is itself audited (VIEW_RIDE);
+  15-minute inactivity sign-out; tokens in sessionStorage; a rider account that
+  signs in is refused ("not authorised") and its session discarded; strict CSP
+  (no inline script/style, no framing, same-origin only); shell is no-store,
+  hashed assets cache immutably; missing assets are 404 not HTML.
+  Money input is parsed with string maths ("25.50" -> 2550 paise), max 2 decimals.
+
+6.9 RIDER APP (Expo)  (RDR-01/03/04/05/06 partial/07/08 partial)
+  Screens: Login (phone -> OTP), Home ("Where to?": pickup list with "use my
+  current location", destination list, "Get fare", recent rides, sign out), Quote
+  (itemised fare, Cash/UPI choice, Book, Change trip), Searching (cancel), Driver
+  coming/arrived (vehicle registration in large type, "about X km away" from live
+  driver location, payment method, cancel), On trip, Pay (Pay with UPI, "do not
+  pay twice", retry on failure), Done (receipt; cash instruction), Ended
+  (cancelled / no drivers available).
+  Places: 6 hard-coded approximate Nagpur landmarks (Railway Station, Sitabuldi,
+  Dharampeth, Sadar, Itwari, Airport) + device location. NO address search, NO map.
+  Behaviours: idempotency key per quote reused on retry (a dropped connection can
+  never create two rides); resumes an unfinished ride or unpaid UPI trip after the
+  app is killed; "Reconnecting..." banner when the live connection drops;
+  friendly error messages (never raw codes); offline-tolerant refresh (a bad
+  network never signs the user out).
+
+6.10 DRIVER APP (Expo)  (DRV-01/02/03/04/05/06/07/08/10)
+  Screens: Login, Onboarding (registration), Pending approval ("check status"),
+  Rejected, Home offline/online (Go online/offline, GPS status pill, live offers
+  with countdown + Accept/Decline), Active ride (step button per state, navigate
+  deep link to pickup/destination, two-step confirm before completing, rider
+  payment method and fare), Trip summary (cash to collect, or UPI status).
+  Behaviours: location permission requested on going online (denied => stays
+  offline with a clear reason); GPS watch + immediate fix; fixes throttled to one
+  per 4 s; sequence numbers derived from the server-corrected clock (100 ms ticks
+  since 2026-01-01) so they keep increasing across restarts; offers refreshed by
+  socket event AND a 5-second poll fallback; countdowns use the SERVER clock
+  (Date header) so a wrong phone clock cannot show an expired offer as live;
+  resumes active ride, online state and GPS after a kill; told when the rider
+  cancels. Foreground location only.
+  Driver never receives rider identity (no name/phone) or the UPI intent.
+
+6.11 SHARED CLIENT PACKAGES
+  ApiClient: typed methods for every endpoint; single-flight token refresh (many
+  parallel 401s cause ONE refresh); retries a request once after refresh; going
+  offline never logs the user out, only the server rejecting the refresh token
+  does; 15-second timeout; maps failures to ApiError (status 0 = network).
+  RealtimeClient: websocket-only, jittered exponential backoff (0.5 s doubling to
+  15 s), always presents a fresh access token, de-duplicates by eventId (last 500).
+  userMessage(): plain-language error text, no codes/stack/server text.
+  Utilities: formatINR (Indian digit grouping, integer maths), parsePhone,
+  registration normalisation, navigation deep link, server-time offset.
+  UI package: Button (>= 52 px tall, aria roles/labels), Field, ErrorBanner,
+  ConnectionBanner, Countdown, Pill, Card, LoginFlow.
+
+6.12 DATABASE SCHEMA (as migrated)
+  0001: FareQuote, Ride, RideAssignment, RideOffer, RideEvent, DriverPresence
+        (generated PostGIS geography column + GiST index), DriverProfile,
+        IdempotencyRecord, OutboxEvent, LedgerTransaction, LedgerEntry, AuditLog.
+  0002: invariants (partial unique indexes, ride_guard trigger, append-only
+        guards, deferred balanced-ledger trigger).
+  0003: User, OtpChallenge, Session (+ role/phone immutability trigger); outbox
+        availableAt (nullable) + partial pending index.
+  0004: Payment, PaymentAttempt, PaymentEvent, Refund, ReconciliationFinding +
+        payment/refund guards.
+  0005: finding resolution columns + completeness check + reopen guard; audit
+        time index.
+  NOT in the schema: Vehicle, ServiceZone, PricingRule, driver documents, driver
+  location history, ratings, payouts, support tickets, safety incidents,
+  notifications. (The reference prisma file lists some of these but is unused.)
+
+6.13 BACKGROUND WORKERS (start with `npm start`)
+  outbox every 300 ms; offer sweep every 1 s; payment provider retries every 2 s;
+  reconciliation every 60 s (looks back 24 h); socket re-validation every 30 s.
+  Each has an overlap guard (a slow tick is skipped, never stacked). Graceful
+  shutdown on SIGTERM/SIGINT.
+
+
+================================================================================
+7. API AND EVENT REFERENCE (AS IMPLEMENTED)
+================================================================================
+All routes are under /api/v1. Success: {"data": ..., "meta": {"requestId"}}.
+Error: {"error": {"code","message","retryable"}, "meta": {"requestId"}}.
+(NOTE: requestId is a fresh UUID per response; it is not yet propagated into logs.)
+
+7.1 AUTH (no login required)
+  POST /auth/otp/request        {phone}
+  POST /auth/otp/verify         {phone, code, role: RIDER|DRIVER}  -> tokens
+  POST /auth/session/refresh    {refreshToken}                      -> rotated tokens
+  POST /auth/session/logout     {refreshToken}
+
+7.2 RIDER
+  POST /fare-quotes             RIDER   {pickup, destination, category}
+  POST /rides                   RIDER   {fareQuoteId, paymentMethod CASH|UPI,
+                                         idempotencyKey (8-100 chars)}
+  GET  /rides                   RIDER   history summaries (fare, payment status)
+  GET  /rides/:id               participants  role-aware view (pickup, destination,
+                                fare; vehicle registration for the RIDER only)
+  POST /rides/:id/cancel        participants
+  GET  /rides/:id/payment       participants  (UPI intent only to the rider)
+  POST /rides/:id/payment/retry RIDER
+
+7.3 DRIVER
+  POST /drivers/onboarding      DRIVER  {registration, category}
+  GET  /drivers/me/status       DRIVER  {verification, online}
+  GET  /drivers/me/active-ride  DRIVER
+  POST /drivers/me/availability DRIVER  {online}
+  POST /drivers/me/location     DRIVER  {lat,lng,accuracyMeters,recordedAt,sequence}
+  GET  /drivers/me/offers       DRIVER
+  POST /ride-offers/:id/accept  DRIVER
+  POST /ride-offers/:id/reject  DRIVER
+  POST /rides/:id/en-route|arrive|start|complete   DRIVER (assigned driver only)
+
+7.4 REALTIME (Socket.IO; auth via handshake auth.token)
+  ride.status.changed   rider+driver   {eventId, rideId, status, stateVersion,
+                                        riderId, driverId}
+  ride.assigned         rider+driver   {eventId, rideId, driverId, riderId}
+  ride.offer.created    offered driver {eventId, rideId, offerId, driverId, expiresAt}
+  ride.offer.invalidated offered driver {eventId, rideId, offerId, driverId,
+                                        reason: DRIVER_OFFLINE | RIDE_CANCELLED}
+  payment.status.changed rider+driver  {eventId, rideId, paymentId, status,
+                                        amountMinor, attempt, riderId, driverId}
+  driver.location       rider of active ride (ephemeral, NO eventId) {rideId,lat,lng,at}
+  Unknown event types are never broadcast. (Gaps vs PRD: no schemaVersion, no
+  serverTimestamp field, event is named driver.location not driver.location
+  .updated, no support.case.updated.)
+
+7.5 PAYMENTS AND WEBHOOKS
+  POST /webhooks/payments/:provider   no auth; HMAC over raw body in header
+                                      x-signature "t=<unix>,v1=<hex>". 200 for any
+                                      verified event (even duplicates), 401 bad
+                                      signature, 404 unknown provider, 503 retry
+                                      later (reference not yet known).
+  POST /dev/fake-pay/:providerRef     DEV ONLY (ENABLE_DEV_TOOLS=1); acts as the
+                                      customer paying against the FAKE provider.
+
+7.6 STAFF (all require a staff role; see matrix in 6.8)
+  GET  /admin/me, /admin/summary                              any staff
+  GET  /admin/drivers?verification=&q=&limit=                 support/ops/super
+  POST /admin/drivers/:userId/review {decision, reason}       ops/super
+  POST /admin/drivers/:userId/suspend {reason}                ops/super
+  POST /admin/users/:userId/reinstate {reason}                ops/super
+  GET  /admin/rides?status=&q=&limit=                         any staff
+  GET  /admin/rides/:id                                       any staff (audited)
+  POST /admin/payments/:rideId/refund {amountMinor, reason}   finance/super
+  GET  /admin/reconciliation/findings                         finance/super
+  POST /admin/reconciliation/run                              finance/super
+  POST /admin/reconciliation/findings/:id/resolve {note}      finance/super
+  GET  /admin/audit-logs                                      ops/finance/super
+  Search text (q) must be 3-40 chars; limit <= 100; wildcards are literal.
+
+7.7 ERROR CODES
+  Domain (HTTP): NOT_FOUND 404, FORBIDDEN 403, NOT_ASSIGNED_DRIVER 403,
+  QUOTE_EXPIRED 410; everything else 409: INVALID_TRANSITION, OFFER_EXPIRED,
+  OFFER_NOT_PENDING, RIDE_NOT_SEARCHING, DRIVER_BUSY, IDEMPOTENCY_CONFLICT,
+  LEDGER_UNBALANCED, REFUND_EXCEEDS_PAYMENT, PAYMENT_NOT_RETRYABLE.
+  Other: VALIDATION_ERROR 400, INVALID_PHONE 400, OTP_INVALID 401, OTP_THROTTLED
+  429, ACCOUNT_SUSPENDED 403, UNAUTHENTICATED 401, SESSION_INVALID 401,
+  WEBHOOK_SIGNATURE_INVALID 401, RETRY_LATER 503, INTERNAL 500 (never leaks
+  internals).
+
+
+================================================================================
+8. CONFIGURATION AND TUNABLES
+================================================================================
+8.1 ENVIRONMENT VARIABLES USED TODAY
+  DATABASE_URL              Postgres connection (required in production; without
+                            it the API runs on the in-memory store, dev only)
+  ACCESS_TOKEN_SIGNING_KEY  required; HMAC key for access tokens
+  ADMIN_PHONES              "+919000000002:SUPPORT,+919000000005:OPS_ADMIN,..."
+  PORT                      default 3000
+  PG_POOL_MAX               default 10
+  NODE_ENV                  "production" makes start-up REFUSE (no real payment
+                            provider / OTP provider configured)
+  ENABLE_DEV_TOOLS=1        exposes the fake-pay dev route (never in production)
+  PAYMENT_WEBHOOK_SECRET    secret for the FAKE provider (dev default exists)
+  ADMIN_UI_DIR              override path to the built console
+  EXPO_PUBLIC_API_URL       (mobile, build time) API base URL; MUST be https in prod
+  TEST_DATABASE_URL         enables the Postgres test suites
+
+8.2 PRD CONFIG NAMES NOT YET USED
+  REDIS_URL, REFRESH_TOKEN_SIGNING_KEY (refresh tokens are opaque/hashed, so no
+  key needed), OTP_PROVIDER_*, MAPS_PROVIDER_*, PAYMENT_PROVIDER_*,
+  PUSH_NOTIFICATION_*, OBJECT_STORAGE_*, APP_PUBLIC_API_URL.
+
+8.3 HARD-CODED TUNABLES (candidates to move into zone/pricing configuration)
+  Offer timeout 15 s | max offers/ride 5 | location freshness 30 s | search radius
+  10 km | quote life 5 min | OTP life 5 min / 5 attempts / 30 s throttle | access
+  token 15 min | refresh token 30 days | webhook tolerance 300 s | stale-payment
+  threshold 120 s | outbox batch 50, max attempts 6, backoff base 1 s | location
+  accuracy cutoff 100 m | future-timestamp tolerance 60 s | console idle timeout
+  15 min | driver location send gap 4 s | rider/driver poll 5 s | road factor 1.3 |
+  assumed speed 6.9 m/s | commission 15% | fare rates (see 6.3).
+
+
+================================================================================
+9. TESTING AND VERIFICATION: WHAT IS PROVEN AND WHAT IS NOT
+================================================================================
+9.1 HOW TO RUN
+  Backend (repo root):
+    npm install
+    npm test                  # memory-backed suites only (no database needed)
+    npm run test:pg           # everything, incl. real-Postgres suites; needs
+                              # Postgres 16 + PostGIS, superuser ride/ride, db
+                              # ride_test (URL: postgres://ride:ride@localhost:5432/ride_test)
+    npm run typecheck
+  Mobile workspace (cd mobile):
+    npm install
+    npm run typecheck         # packages + rider + driver + admin
+    npm test                  # unit, client-vs-real-server, UI, console, hygiene
+    npm run build:admin       # builds the staff console to apps/admin/dist
+  Live checks against a running server: apps/api/scripts/smoke.ts (dispatch +
+  realtime + restart) and smoke-pay.ts (UPI path + restart); usage in README.
+
+9.2 BACKEND SUITES (declared tests; most run on BOTH memory and Postgres)
+  domain.test.ts      22  fares; state machine; ledger maths; the dispatch suite
+                          (nearest-first, stale/offline/unapproved/busy/out-of-
+                          radius skipped, concurrent accept, expired accept,
+                          reject/timeout/exhaustion, offline invalidation, full
+                          lifecycle, cancel notifies driver, outbox, ledger repo)
+  pg.test.ts          16  DB invariants attacked with raw SQL (bypassing the app);
+                          real concurrency: 12 rides race for 1 driver, 15
+                          identical bookings, 6 simultaneous completes, 8
+                          identical ledger posts, concurrent sweeps; restart
+                          survival; rollback of a failed completion; bad ids
+  auth.test.ts        12  hashes only, restart survival, single-use OTP under
+                          concurrency, committed attempt limit, throttle/expiry,
+                          refresh reuse revokes family, suspension, logout/expiry,
+                          phone normalisation, role/phone immutability guard
+  outbox.test.ts       8  order, batching, backoff, dead-letter, timeout, stable
+                          event id, 4 concurrent workers publish 40 events once
+  realtime.test.ts     5  handshake rejection, offers/assignment/status/location
+                          only to the right users, stranger gets nothing, clients
+                          cannot join rooms/inject, pending-before-attach, socket
+                          revalidation on suspension/expiry
+  e2e.test.ts          8  HTTP: auth, throttle, full ride, exclusivity, GPS rules
+  payments.test.ts    22  creation idempotency, outage + worker retry, forged/
+                          tampered/replayed webhooks, capture + balanced ledger,
+                          8 concurrent duplicate events, amount mismatch, unknown
+                          reference not consumed, retry/duplicate payment refund,
+                          reconciliation repairs, refunds (partial/final/caps/
+                          concurrency/async/failure/outage), DB guard test
+  payments.e2e.test.ts 8  the same over HTTP incl. role checks and no secret leak
+  views.e2e.test.ts    1  role-aware ride views, active-ride, history, privacy
+  admin.e2e.test.ts   12  full role matrix, staff roles only via allow-list, phone
+                          masking per role, audit-on-view, summary/drivers/rides
+                          search (wildcards literal), ride detail composition,
+                          refund visible in detail, finding resolve-once, suspend/
+                          reinstate, static hosting headers, DB guard on findings
+  RESULT: 165 passed on PostgreSQL (the memory-only subset also passes).
+
+9.3 MOBILE WORKSPACE SUITES
+  packages/client/test/unit.test.ts (13): formatINR, phone/registration parsing,
+    message hygiene, token-expiry parsing, ApiClient (single-flight refresh,
+    retry-once, offline never signs out, session end, error mapping, server-clock
+    correction), RealtimeClient de-duplication.
+  packages/client/test/flow.test.ts (8): REAL controllers vs the REAL server with
+    its real workers: full UPI trip (offer arrives by socket, live location,
+    payment confirmed by provider webhook), dropped-connection booking creates
+    exactly one ride, kill/reopen both apps mid-trip, missed events recovered on
+    reconnect, cancel flows, permission/approval guards, friendly input errors,
+    suspended account signed out.
+  apps/rider/test/two-phones.test.tsx (8): the actual rider and driver SCREENS
+    rendered with react-native-web, operated through accessible roles/labels like
+    a person, both phones against the real server: complete UPI trip screen by
+    screen; cash trip (rider told to pay cash, driver told the same amount);
+    cancel while searching; login mistakes; reconnect banner; driver permission
+    denied; rider cancels after acceptance; driver relaunch mid-trip.
+  apps/admin/test/console.test.tsx (9): each role signs in and sees only its own
+    navigation; rider account refused; driver approval/suspend/reinstate with
+    mandatory reasons and masking; ride dispute view with validated refunds and
+    ledger balance; reconciliation resolve; audit log content; idle sign-out;
+    server-ended session returns to login; sign-out.
+  test/workspace.test.ts (1): exactly ONE copy of react, react-dom, react-native.
+  RESULT: 39 passed. Typecheck clean. Metro bundles succeeded for BOTH mobile apps
+  on web, Android (Hermes bytecode) and iOS; the console builds with Vite and the
+  output has no inline script/style.
+
+9.4 WHAT HAS *NOT* BEEN VERIFIED (read this carefully)
+  - NOT run on a physical phone or emulator: GPS accuracy, secure storage, real
+    permission prompts, the UPI app hand-off (upi:// deep link), notifications,
+    battery behaviour, real screen sizes, dark mode, keyboard behaviour,
+    performance, TalkBack/VoiceOver. react-native-web in jsdom is an approximation.
+  - Staff console NOT opened in a real browser. CSP is not enforced by jsdom: the
+    first real load may reveal CSP violations. Console never tested for cross-
+    browser behaviour or responsive layout.
+  - No real provider of any kind was exercised (payments, SMS, maps, push).
+  - PRD non-functional targets (p95 latencies, match time, availability) were NOT
+    measured; there has been NO load test, security penetration test, failure
+    injection beyond what is listed, or restore/rollback drill.
+  - The Postgres used for tests was installed in a sandbox (apt); production
+    topology (managed Postgres, pooling, replicas, backups) is unproven.
+  - Timing flakiness: in one combined mobile run a client test ("live location" in
+    the full UPI trip) timed out once; alone it passed repeatedly. Not root-caused.
+    Earlier flakiness was traced to test-state leaks and fixed, but this residue
+    may be load-related.
+  - Concurrency was tested with many simultaneous connections on ONE machine, not
+    multi-instance deployment (Socket.IO needs the Redis adapter for that).
+
+9.5 TEST-ENVIRONMENT NOTES FOR FUTURE MAINTAINERS
+  - Tests use mocked clocks in places; real server clock in the mobile harness.
+  - The mobile harness resets the shared world between tests (open rides
+    cancelled, offers withdrawn, drivers offline); without it, a leftover ride is
+    re-offered to a later test's driver.
+  - OTP is throttled per phone for 30 s: tests use distinct phones or advance a
+    mocked clock. Console tests use dedicated staff phones per role.
+  - vitest in mobile aliases react-native -> react-native-web and dedupes react.
+    That alias can HIDE a duplicate-React install, hence workspace.test.ts.
+
+
+================================================================================
+10. REQUIREMENT-BY-REQUIREMENT STATUS (PRD TRACEABILITY)
+================================================================================
+10.1 RIDER (RDR)
+  RDR-01 Phone auth ........... DONE     OTP expiry, replay, throttle, attempt limit
+  RDR-02 Pickup selection ..... PARTIAL  device GPS + 6 hard-coded landmarks; NO
+                                         address search, NO manual pin, NO map
+  RDR-03 Fare quote ........... PARTIAL  itemised server quote, expiring, owner-
+                                         scoped; distance is a straight-line x1.3
+                                         ESTIMATE; one category (AUTO); placeholder
+                                         rates; no GET /fare-quotes/:id
+  RDR-04 Book ride ............ DONE     idempotent; client never sends a fare
+  RDR-05 Track driver ......... PARTIAL  live location + status; after reconnect
+                                         status is restored from REST but the
+                                         driver's last position is NOT stored/
+                                         returned (appears on next ping); no ETA
+  RDR-06 Cancel ride .......... PARTIAL  authoritative cancel; NO fee/policy
+                                         (cancellationFeeMinor defined, unused)
+  RDR-07 Pay .................. PARTIAL  cash + UPI statuses work end to end with
+                                         the FAKE provider; no real UPI
+  RDR-08 Ride history ......... PARTIAL  own rides only (latest 50, no pagination);
+                                         NO receipts endpoint/screen
+  RDR-09 Rate / report ........ NOT DONE
+  RDR-10 Safety ............... NOT DONE  no SOS, share-trip or incident reporting
+10.2 DRIVER (DRV)
+  DRV-01 Onboarding ........... DONE*    cannot go online/accept until approved.
+                                         *Only registration number + category are
+                                         collected; NO documents/vehicle records
+  DRV-02 Availability ......... DONE     server-side eligibility on going online
+  DRV-03 Location ............. PARTIAL  authenticated, validated, ordered, server-
+                                         time freshness; NOT rate-limited
+  DRV-04 Offer ................ DONE     expiry + pickup shown (destination only
+                                         after acceptance)
+  DRV-05 Accept ............... DONE     one winner; expired/stale rejected
+  DRV-06 Arrival .............. PARTIAL  assigned driver + valid state only; no
+                                         proximity/geofence check
+  DRV-07 Start trip ........... PARTIAL  assigned driver + state; no pickup checks
+                                         (e.g. rider OTP/PIN, proximity)
+  DRV-08 Complete trip ........ DONE     retry-safe; snapshot + money in one tx
+  DRV-09 Earnings ............. NOT DONE  only a per-trip summary; no earnings/
+                                         payout endpoints or screens
+  DRV-10 Offline .............. DONE
+10.3 ADMIN (ADM)
+  ADM-01 Driver review ........ DONE     reason recorded; audited
+  ADM-02 Live operations ...... PARTIAL  ride list by status/search; no zone/
+                                         driver/age filters, no live map
+  ADM-03 Pricing .............. NOT DONE  rates are constants in code
+  ADM-04 Reconciliation ....... DONE*    findings + resolve; *no export, ageing,
+                                         bulk tools, or settlement-file import
+  ADM-05 Refunds .............. PARTIAL  permissioned + audited + capped; NOT
+                                         idempotency-keyed (a double submit makes
+                                         two refunds up to the cap)
+  ADM-06 Safety incidents ..... NOT DONE
+  ADM-07 Restrictions ......... DONE     suspend/reinstate with reasons, audited
+  ADM-08 Audit trail .......... DONE     actor, target, reason, time, before/after
+10.4 ACCEPTANCE SCENARIOS
+  AC-01 DONE   AC-02 DONE   AC-03 DONE   AC-04 DONE   AC-05 DONE   AC-06 DONE
+  AC-07 PARTIAL  idempotent cash ledger at completion; there is no separate
+                 driver "confirm collection" action to retry
+  AC-08 DONE   AC-09 DONE   AC-10 DONE   AC-11 DONE
+  AC-12 PARTIAL  committed data survives connection/process restart and outbox
+                 resumes (tested); no DB-server crash, restore, or kill-under-load
+                 drill
+10.5 PRD SECTION-LEVEL SUMMARY
+  Sec 3 architecture ..... PARTIAL (no Redis, no Prisma, no contracts package)
+  Sec 5 requirements ..... see above
+  Sec 6 state machine .... DONE (plus DB-level trigger)
+  Sec 7 dispatch ......... DONE except radius expansion, routing ETA, metrics
+  Sec 8 data model ....... PARTIAL (core entities; many PRD entities absent)
+  Sec 9 REST API ......... PARTIAL (see section 11)
+  Sec 10 realtime ........ PARTIAL (see 7.4)
+  Sec 11 payments ........ PARTIAL (UPI via fake provider; cash obligation yes,
+                           driver confirmation/remittance/payouts no)
+  Sec 12 location/Expo ... PARTIAL (no dev builds/EAS, no background location,
+                           no device testing; zone is a box)
+  Sec 13 security ........ PARTIAL (see 12.5)
+  Sec 14 NFR/observability NOT DONE (no metrics/dashboards/alerts/load tests)
+  Sec 15 testing ......... PARTIAL (domain/API/DB/dispatch/payment/realtime/UI
+                           covered; no mobile E2E on devices, security pen test,
+                           failure injection beyond listed, load, recovery)
+  Sec 16 deployment ...... NOT DONE (no Docker, CI/CD, envs, EAS)
+  Sec 17 pilot ........... NOT STARTED
+  Sec 18 roadmap ......... M1, M2 done (with gaps); M3 largely done; M4 partial;
+                           M5 not started
+
+
+================================================================================
+11. DEVIATIONS FROM THE PRD (AND WHY)
+================================================================================
+ 1. Repository layout: backend at the repo root under apps/api; clients in a
+    separate npm workspace under mobile/ (including the admin console). The PRD
+    wants apps/{rider-mobile,driver-mobile,admin-web,api} + packages/{contracts,
+    validation,...}. Reason: speed of incremental delivery. Consequence: API types
+    are hand-copied into the client (drift risk); no shared contracts package.
+ 2. No Prisma: plain `pg` + SQL migrations (the sandbox could not reach Prisma's
+    engine host). prisma/schema.prisma is a stale reference.
+ 3. No Redis: Postgres alone carries presence, locks and queues. Allowed by the
+    PRD ("not the sole correctness boundary") but the PRD expects Redis for
+    presence/rate limiting/coordination; multi-instance Socket.IO needs it.
+ 4. Mobile stack: custom controllers + a tiny store + simple state-driven screens,
+    instead of React Navigation, TanStack Query, Zustand, React Hook Form and Zod.
+ 5. Endpoint differences from PRD 9:
+      implemented                         PRD name / status
+      POST /rides/:id/en-route            (PRD has DRIVER_ARRIVING transition only)
+      GET  /rides/:id/payment             PRD: GET /payments/:id
+      POST /rides/:id/payment/retry       PRD: POST /payments/intents
+      (no confirm endpoint)               PRD: POST /payments/:id/confirm
+      POST /admin/payments/:rideId/refund PRD: POST /payments/:id/refunds
+      POST /admin/users/:id/reinstate     PRD: /admin/drivers/:id/reinstate
+      GET  /admin/reconciliation/findings PRD: /admin/payments/reconciliation
+      MISSING: GET/PATCH /users/me, GET /places/autocomplete, GET /fare-quotes/:id,
+      POST /rides/:id/ratings, POST /rides/:id/support-tickets, GET /drivers/me/
+      earnings, GET /drivers/me/payouts, GET /payments/:id/receipt, GET/POST
+      /admin/pricing-rules, /admin/support-tickets, /admin/safety-incidents.
+ 6. Realtime: event "driver.location" (PRD: driver.location.updated); payloads lack
+    schemaVersion and a server timestamp; no support.case.updated; no sequence on
+    location events.
+ 7. Access token is a custom HMAC token, not a standard JWT (PRD does not demand
+    JWT). REFRESH_TOKEN_SIGNING_KEY is unnecessary because refresh tokens are
+    opaque random values stored hashed.
+ 8. Pricing and zone are code constants (PILOT_RULE, NAGPUR_BOX), not PricingRule/
+    ServiceZone tables with PostGIS polygons.
+ 9. Ride stores pickup columns; destination lives on the FareQuote.
+10. Only the latest driver position is stored (no DriverLocation history).
+11. Staff console is a Vite/React app inside the mobile workspace, served by the
+    API at /console, instead of a separate apps/admin-web deployment.
+12. Staff MFA (PRD: mandatory for privileged admin) is NOT implemented; staff use
+    the same phone OTP as everyone, gated by the allow-list.
+13. Fare at completion equals the quoted fare; there is no recalculation from the
+    actual trip (distance/time/route) as the PRD's "successful fare calculation"
+    on completion implies.
+
+
+================================================================================
+12. EVERYTHING LEFT TO IMPLEMENT
+================================================================================
+Priority:  P0 = blocks any real-user pilot     P1 = needed for a credible pilot
+           P2 = needed to scale / compete       P3 = nice to have
+Size    :  S = days, M = 1-3 weeks, L = 1+ month (RELATIVE effort for one
+           experienced engineer; NOT a schedule -- the PRD says dates must come
+           from real task estimates and confirmed capacity)
+Dependencies noted as "needs:".
+
+12.1 REAL EXTERNAL INTEGRATIONS (all P0; each is behind an interface already or
+     needs one)
+  [P0 M] Real UPI payment provider adapter. needs: provider chosen + merchant
+         onboarding. Map the gateway's own webhook signature scheme, event names,
+         payment/refund model; validate with its SANDBOX: success, failure,
+         timeout, delayed + duplicate callbacks, refunds, settlement reports.
+         Implement PaymentProvider (domain/payments/provider.ts). Replace the
+         start-up guard that refuses production.
+  [P0 S-M] Real OTP/SMS provider adapter (OtpSender). India usually requires
+         regulated sender/template registration for transactional SMS (DLT) --
+         verify with the provider. Add delivery-failure handling and abuse limits.
+  [P0 M] Maps stack: (a) geocoding/place autocomplete for pickup/destination
+         (RDR-02, GET /places/autocomplete); (b) routing for real distance/time in
+         quotes and for pickup ETA in dispatch (EtaFn hook exists); (c) map
+         display + pin placement in the apps; (d) navigation hand-off (deep link
+         exists). needs: provider + keys + cost model + attribution rules.
+  [P0 M] Push notifications (FCM/APNs via Expo or direct): offers when the driver
+         app is backgrounded, ride status for riders, payment states. Today a
+         backgrounded app gets NOTHING (sockets only).
+  [P1 M] Object storage for driver documents (restricted, expiring access links).
+
+12.2 RIDER FEATURES NOT BUILT
+  [P0 M] Cancellation policy + fee (RDR-06): policy rules (free window, fee after
+         driver arrives/after N minutes), fee in quote/ledger, authoritative
+         result shown to rider; driver compensation. The 2000-paise constant is
+         unused.
+  [P0 L] Safety (RDR-10): SOS/emergency contact, share-trip link, in-trip incident
+         report, driver/vehicle details visible, trip PIN/OTP at pickup.
+  [P1 M] Ratings and reports (RDR-09): rating + tags + comment tied to a
+         completed trip; abuse/low-rating handling.
+  [P1 M] Receipts/invoices (RDR-08, GET /payments/:id/receipt): tax-compliant
+         format (GST treatment needs finance/legal input), PDF/email/share.
+  [P1 S] Pagination for history; ride detail screen from history.
+  [P1 M] Address search + manual pin on a map (RDR-02), saved places, recents.
+  [P1 M] Profile (GET/PATCH /users/me): name, emergency contacts, preferences,
+         account deletion and data export flows.
+  [P1 M] ETA and driver-arrival countdown; route polyline; persist/return the
+         driver's last location so reconnect restores it (RDR-05).
+  [P2 M] Multiple vehicle categories/pricing (auto, cab, bike-taxi if legal),
+         scheduled rides, promo codes/wallet, ride-for-someone-else, tipping.
+  [P2 S] Hindi and Marathi localisation (strings are not externalised yet).
+
+12.3 DRIVER FEATURES NOT BUILT
+  [P0 L] Real onboarding (DRV-01): document capture/upload (licence, RC,
+         insurance, permit, PUC, badge, police verification -- exact list is a
+         DECISION), vehicle records (Vehicle table, one-to-many), expiry tracking
+         and re-verification, status per document, rejection reasons shown to
+         driver, resubmission.
+  [P0 M] Cash collection workflow (PRD 11.3): driver "confirm collected" action,
+         clearing of the rider_cash_obligation receivable, outstanding commission
+         balance per driver, limits/blocks when balance is high, remittance
+         recording, disputes/adjustments. Today the cash receivable is posted at
+         completion and NEVER cleared.
+  [P1 M] Earnings (DRV-09): per-trip gross, commission, adjustments, payable;
+         daily/weekly summaries; endpoints + screens (GET /drivers/me/earnings).
+  [P1 L] Payouts (GET /drivers/me/payouts): payout model decision, batching,
+         bank/UPI payout provider, statements, failure handling, tax docs.
+  [P0 L] Background location: foreground service / background-location permission
+         and store disclosures; handle screen lock, app kill, battery optimisation,
+         GPS loss; stop claiming availability when freshness cannot be kept.
+         Today location stops when the app is backgrounded.
+  [P1 S] Server-side location RATE LIMIT (DRV-03); persist a short location
+         history for disputes (with retention rules).
+  [P1 M] Arrival/start checks (DRV-06/07): proximity to pickup, rider PIN/OTP,
+         wait-time handling, no-show handling and fees.
+  [P2 M] Driver incentives/bonuses, heat-map/demand hints, trip history, ratings
+         view, support chat/call, multi-ride/queue (if ever), destination filter.
+
+12.4 ADMIN / OPERATIONS FEATURES NOT BUILT
+  [P0 L] Safety incident management (ADM-06): severity, restricted access,
+         assignment, escalation history, SLA timers, linkage to trip + audio/
+         location evidence, escalation to police/insurer contacts, runbooks.
+  [P1 L] Support ticketing (support.case.updated, /admin/support-tickets):
+         cases linked to trips, assignment, statuses, macros, rider/driver
+         communication channel, SLAs, CSAT.
+  [P1 M] Pricing administration (ADM-03): PricingRule + ServiceZone tables,
+         versioned non-overlapping rules, activation workflow, audit, surge/
+         time-of-day rules if desired, tax lines, rounding policy.
+  [P1 M] Live operations (ADM-02): live map of drivers/rides, filters by zone,
+         driver, age, stuck-ride alerts, manual intervention tools that go
+         THROUGH domain rules (never edit status directly).
+  [P1 M] Driver management depth: document review UI, expiry alerts, performance
+         and complaint history, bulk actions.
+  [P1 M] Finance depth: ledger explorer, cash-receivable ageing by driver,
+         settlement-file import and matching, payout runs, refund idempotency key,
+         manual "mark paid / force capture" with dual approval for AMOUNT_MISMATCH
+         findings, exports (CSV), daily close.
+  [P1 S] Staff account management UI (today staff exist only via ADMIN_PHONES
+         allow-list); role changes with SUPER_ADMIN audit; MFA for privileged
+         roles (PRD mandatory): TOTP/WebAuthn, session lists, forced sign-out.
+  [P1 S] Pagination, sorting, saved filters, CSV export across console tables.
+  [P2 M] Analytics/BI: marketplace dashboards (see section 15), cohort and
+         funnel reports.
+
+12.5 SECURITY AND PRIVACY GAPS
+  [P0 M] Rate limiting and abuse controls: per-IP and per-account on OTP request,
+         verify, booking, location, search; webhook endpoint throttling;
+         device/session controls; anomaly monitoring; ban/appeal workflow.
+  [P0 M] Logging hygiene: structured logs with request-id propagation (today the
+         response requestId is random and uncorrelated), redaction of phones,
+         tokens, precise locations; no secrets in logs.
+  [P0 M] Secrets management and TLS: secrets manager, key rotation (access token
+         key, webhook secret), TLS termination, HSTS, secure headers on the API
+         (console has strict headers already), restricted DB credentials.
+  [P1 M] Security testing: IDOR/privilege-escalation/replay/webhook-forgery pen
+         test, dependency + static scans in CI, threat model, fix findings.
+  [P1 M] Privacy: data inventory, consent text, retention/anonymisation jobs
+         (outbox, sessions, OTP rows, locations, idempotency keys never expire
+         today), data-access and DELETION workflows consistent with legal
+         retention, privacy-aware location sharing.
+  [P1 S] Add missing foreign keys (Ride.riderId/driverId, Payment/Refund actors
+         reference users as plain text today).
+  [P2 S] Prefer HttpOnly cookie sessions for the console (today tokens are in
+         sessionStorage, protected by CSP only) with a CSRF design.
+  [P1 M] LEGAL AND REGULATORY REVIEW (not engineering): aggregator licensing/
+         guidelines, driver verification obligations, insurance, fare regulation
+         for autos, data-protection law, consumer protection, GST/tax on rides
+         and platform fees, payments regulation, emergency procedures. The PRD
+         forbids claiming compliance before this is assessed and evidenced.
+
+12.6 RELIABILITY, INFRASTRUCTURE, OBSERVABILITY, DELIVERY
+  [P0 M] Containerisation + environments: Dockerfiles, compose for local,
+         dev/staging/production configs and separate app identifiers, managed
+         Postgres (PostGIS) with backups, PITR, and tested restore (RPO/RTO).
+  [P0 M] CI/CD (PRD 16.2): locked installs, lint/format/typecheck, tests, scans,
+         OpenAPI/contract checks, migration checks against clean DB AND previous
+         schema, staging deploy with smoke/E2E/concurrency, approval, health-
+         checked deploy, rollback, post-deploy monitoring. EAS Build/Submit for
+         Expo (native permission changes require a new native build).
+  [P0 M] Observability: health/readiness endpoints (none exist), metrics (API
+         latency/errors, DB pool/slow queries/locks, socket connects/reconnects,
+         worker + outbox backlog, provider errors), business dashboards, alerts
+         exercised in staging, incident runbooks, on-call.
+  [P1 M] Redis (PRD): presence, candidate lookup acceleration, rate limiting,
+         Socket.IO adapter for multiple API instances; keep Postgres authoritative.
+  [P1 M] Horizontal scaling review: access-token verification does a DB lookup on
+         every request (cache), sweep/reconcile workers run on every instance
+         (safe via locks but wasteful), connection pooling (PgBouncer), outbox and
+         idempotency table retention/archival.
+  [P1 M] Dispatch quality: routing-based ETA, radius expansion by zone policy,
+         metrics (candidates, response time, acceptance, match latency, no-driver
+         rate), supply/demand tuning, reoffer fairness.
+  [P2 L] Load testing at a DECLARED baseline (bookings, GPS updates, concurrent
+         dispatch), capacity plan, failure injection (DB/Redis/provider/worker),
+         chaos and recovery drills, performance budgets for the PRD NFR table.
+
+12.7 CONTRACTS, DOCS, QUALITY
+  [P0 M] OpenAPI specification for every endpoint (PRD: "before implementation"),
+         generated/validated in CI; versioning policy; shared contracts package
+         so mobile/admin types cannot drift from the server.
+  [P1 M] Mobile E2E on PHYSICAL ANDROID devices (and iOS) for the critical flows;
+         crash reporting; crash-free-session tracking per app; accessibility audit
+         (TalkBack/VoiceOver, font scaling, contrast); low-end device performance.
+  [P1 S] Browser testing for the console (real CSP enforcement, Chrome/Firefox/
+         Safari, responsive layout).
+  [P1 M] Documentation set: architecture, API, security, runbooks (PRD docs/
+         structure), support playbooks, operations handbook, onboarding for
+         engineers.
+  [P1 S] Resolve the residual timing-flaky mobile test; add a CI re-run policy.
+  [P2 S] Remove the unused prisma reference or adopt Prisma deliberately.
+
+12.8 PILOT AND LAUNCH WORK (non-code, PRD section 17)
+  Phase A internal validation; Phase B closed pilot with a bounded zone, limited
+  manually reviewed drivers, invited riders, STAFFED monitoring and per-trip
+  reconciliation; Phase C measured expansion with pre-agreed service, safety,
+  financial and support criteria. Go/no-go checklist from PRD 17.1. Recruit/
+  train ops, support, safety and finance staff; set up driver verification desk;
+  insurance; emergency procedures; driver community/onboarding events.
+
+
+================================================================================
+13. KNOWN LIMITATIONS, RISKS AND GOTCHAS
+================================================================================
+13.1 CORRECTNESS / DATA
+  - The cash receivable (rider_cash_obligation) is posted at completion and never
+    cleared (no collection workflow): the ledger balances but shows a growing
+    receivable.
+  - Location sequence numbers are derived from the clock in 100 ms ticks since
+    2026-01-01 and stored in an int4 column: they OVERFLOW around October 2032.
+    Change the column to bigint (and client math) well before then.
+  - Final fare always equals the quoted fare; real trip distance/time never
+    adjusts it. Quotes use straight-line x 1.3 as the distance estimate.
+  - Refund requests are not idempotency-keyed: a double click can create two
+    refunds (still capped by the amount paid).
+  - Suspending a driver mid-trip does not end the trip; it signs them out and
+    takes them offline. Policy for that case is undecided.
+  - AMOUNT_MISMATCH leaves the payment un-captured with no manual resolution tool.
+  - Missing foreign keys (see 12.5) and unbounded growth of outbox, idempotency,
+    sessions and OTP rows (no retention jobs).
+  - Console lists are capped (50/100) with no pagination; audit listing reads all
+    rows then slices the latest 300; phone search uses LIKE without a suitable
+    index (fine for pilot volumes, not for scale).
+  - Everything is INR-only; timestamps are UTC with device-local display.
+13.2 RELIABILITY / SCALE
+  - Single API instance assumed: LiveHub is in-process (no Redis adapter), workers
+    run in every instance, the in-memory Store is for tests/dev only.
+  - Every authenticated request does a user lookup (token role is re-read).
+  - The outbox claim transaction stays open while publishing; fine for in-process
+    fan-out, wrong for slow network publishers (use enqueue-only publishers).
+  - Postgres in the build sandbox was started/stopped by hand; real operations
+    (backup, failover, pooling) are untested.
+13.3 SECURITY
+  - OTP-only staff login (SIM-swap risk) without MFA.
+  - Console tokens are in sessionStorage (XSS-reachable); CSP mitigates, not
+    eliminates.
+  - Webhook endpoint relies solely on HMAC + timestamp (no IP allow-list/rate
+    limit).
+  - No rate limiting anywhere beyond OTP resend throttle and attempt cap.
+  - The fake provider's default secret exists for dev; production start refuses
+    to run, so it cannot ship by accident, but never reuse it.
+13.4 MOBILE
+  - Foreground-only location; no push; no map; English only; placeholder bundle
+    ids (com.example.nagpurrides.*); approximate landmark coordinates; UPI deep
+    link is generated by the FAKE provider (a real gateway supplies its own intent/
+    QR; Android may need intent <queries> entries; iOS needs LSApplicationQueries
+    Schemes -- upi, gpay, phonepe, paytmmp are listed in the rider app.json).
+  - Expo Go is not sufficient for production native capabilities; use development
+    builds (PRD 12.2).
+  - Duplicate React installs are SILENT (bundles and tests still pass). Keep the
+    overrides in mobile/package.json and the workspace guard test.
+13.5 DEVELOPER GOTCHAS
+  - NestJS decorators need experimentalDecorators; vitest/esbuild lacks
+    emitDecoratorMetadata, so providers use explicit @Inject(...) everywhere.
+  - The webhook route needs the RAW body: create the app with { rawBody: true }
+    (main.ts and test apps do).
+  - In the in-memory Store a thrown error does NOT roll back earlier writes; do
+    not write-then-throw (Postgres would roll back, memory would not).
+  - Any state that must survive a refusal (OTP attempts, offer expiry) must be
+    committed, then the error thrown after the transaction.
+  - Lock order OFFER -> RIDE -> DRIVER must be preserved in new code.
+  - Tests that click must wait for the button to be enabled.
+  - OTP throttle is per phone for 30 s: parallel test files/real-time tests can
+    collide on shared phones.
+
+
+================================================================================
+14. DECISIONS ONLY THE OWNER CAN MAKE (BLOCKING)
+================================================================================
+From PRD 19.1:
+  1. Service boundary: the approved Nagpur polygon, eligible pickup/drop-off areas,
+     operating hours. (Code currently uses a bounding box as a stand-in.)
+  2. Vehicle categories (auto only for pilot?), required driver/vehicle documents,
+     eligibility rules (vehicle age, permit, badge, background checks).
+  3. Pricing: base/per-km/per-minute rates, minimum fare, waiting charges, night/
+     peak rules, cancellation policy and fees, taxes (GST) and rounding. Check how
+     auto fares are regulated in Nagpur before choosing meter-vs-app pricing.
+  4. Payment provider, merchant onboarding, UPI flow (intent vs QR vs collect),
+     webhook contract, settlement process and timing.
+  5. Commission model and rate, cash-collection reconciliation rules, payout
+     model/schedule/threshold (or alternative: subscription / zero-commission
+     SaaS-style model -- see section 15).
+  6. Staffing for driver verification, support, incidents, finance; pilot hours.
+  7. Pilot cohort sizes, trip volume, operating hours, expansion thresholds.
+  8. Legal review: approvals/licences, insurance, driver checks, emergency
+     procedures, data retention.
+Additional decisions this build surfaced:
+  9.  Product name/brand, app-store accounts, bundle identifiers.
+ 10.  Languages at launch (English only today; Hindi/Marathi likely needed).
+ 11.  Safety scope for pilot (SOS, trip PIN, share-trip, call masking).
+ 12.  Support channels (in-app, phone, WhatsApp) and hours.
+ 13.  Rider verification level (OTP only today) and fraud policy.
+ 14.  Suspension policy mid-trip; no-show and wait-time policy.
+ 15.  Hosting provider/region, managed Postgres vendor, SMS and maps vendors, cost
+      budget per trip for maps/SMS/payments.
+ 16.  Whether staff may see full phone numbers (today: ops/super only) and which
+      PII access needs extra approval.
+
+
+================================================================================
+15. WHAT A SUCCESSFUL UBER-STYLE PRODUCT LOOKS LIKE
+================================================================================
+(General product/industry knowledge, NOT facts about this repo. Numbers are
+indicative rules of thumb to calibrate expectations, not sourced benchmarks;
+regulation notes must be verified with counsel. Section 15.14 scores this project
+against these dimensions.)
+
+15.1 THREE LEVELS OF "SUCCESS"
+  Level 1 - IT WORKS: a rider can request, a driver can accept, the trip happens,
+    the money is right. (Technology.)
+  Level 2 - IT IS TRUSTED: people use it again, drivers stay, nothing alarming
+    happens, disputes are resolved fairly and fast. (Operations, safety, support.)
+  Level 3 - IT WINS A MARKET: reliable ETAs because there are enough drivers
+    nearby, drivers earn enough to stay, riders get a price/safety/convenience
+    reason to prefer it, and the unit economics work. (Marketplace.)
+  A technically perfect app at Level 1 with no drivers on the road is a failure.
+  For a Nagpur pilot the realistic goal is a RELIABLE, SAFE, FINANCIALLY CLEAN
+  service in a small geofenced area, with enough density that riders get a driver
+  within a few minutes. Technology is the smaller half of that goal.
+
+15.2 THE RIDER EXPERIENCE
+  - Speed: open app -> confirmed ride request in well under a minute; the home
+    screen already knows the user's location and suggests recents.
+  - Price certainty: an upfront, itemised fare BEFORE booking; the final price
+    matches unless the rider changes the trip; no hidden fees; clear cancellation
+    rules.
+  - Accurate ETAs and a live map: driver position on a map, route, ETA that is
+    honest (underpromise), pickup-pin refinement ("meet me at gate 2").
+  - Pickup success: driver identity/vehicle clearly shown (name, photo, plate),
+    a PIN to confirm the right rider, call/chat that masks phone numbers.
+  - Safety: SOS button, share-trip link with live tracking, trusted contacts,
+    route-deviation and long-stop detection, ability to report during/after.
+  - Payment: cash, UPI, saved methods, wallet; fast and unambiguous states ("paid",
+    "pay driver in cash"); receipts/invoices; easy disputes and refunds.
+  - Trust: ratings both ways, transparent cancellation reasons, sensible
+    handling of no-shows.
+  - Inclusivity and reach: local languages (here Hindi and Marathi), works on
+    low-end Android and patchy networks, small download, accessible (screen
+    readers, large text, contrast), clear error recovery.
+  - Support: in-app help tied to a specific trip, fast human response for safety
+    and payment issues.
+
+15.3 THE DRIVER EXPERIENCE (supply is the scarce resource)
+  - Fast, respectful onboarding: clear checklist, document upload from a phone,
+    status visibility, reasons for rejection, a human helpdesk, same-week
+    activation target.
+  - Earnings clarity: per-trip gross, commission, adjustments, payable; weekly
+    statements; fast, predictable payouts; honest incentive rules.
+  - Fair, transparent dispatch: offers that show enough to decide (distance to
+    pickup, destination or fare where policy allows), short countdowns, no
+    penalty-by-surprise, no use of protected characteristics.
+  - Reliability in the field: works with screen locked, survives app kill, handles
+    bad GPS and bad data; battery-friendly; clear "you are not receiving rides
+    because ..." messaging.
+  - Cash handling that is simple and auditable (daily commission settlement,
+    clear balances), because cash is a large share of trips in many Indian cities.
+  - Navigation hand-off to the driver's preferred maps app, minimal taps per trip.
+  - Safety and dignity: SOS, rider ratings/blocks for abusive riders, grievance
+    channel, insurance information.
+  - Many drivers use SEVERAL apps ("multi-homing"): a driver app that is light,
+    fair and quick to switch on wins attention.
+
+15.4 THE MARKETPLACE (where most clones fail)
+  - LIQUIDITY IS LOCAL: value comes from drivers being close to riders RIGHT NOW.
+    Launch in a small geofence with concentrated supply and demand (a few
+    high-demand clusters: railway station, airport, hospitals, markets, colleges,
+    office areas) rather than the whole city thinly.
+  - Chicken-and-egg: pay for supply first (guaranteed earnings/incentives for the
+    first cohort), then pull demand with promotions and local partnerships; watch
+    pickup time and match rate to know when to widen.
+  - Matching quality: nearest-ETA first is a good baseline; refine with routing
+    ETA, acceptance probability, driver fairness, and batching only when density
+    justifies it. Sequential offers (this PRD) keep things simple and fair.
+  - Pricing and economics: a fare that riders accept and drivers consider fair;
+    take rate or subscription that covers support, payments, maps, SMS, insurance
+    and marketing; cancellation fees and no-show rules that protect drivers'
+    time; incentives funded deliberately. Dynamic/surge pricing adds revenue and
+    balances demand, but is regulated and can damage trust: decide policy
+    explicitly. For auto-rickshaws, local fare norms/regulation usually matter.
+  - Supply acquisition and retention: referral programmes, community leaders,
+    visible earnings, fast payouts, low churn through fair treatment.
+  - Demand retention: reliability beats discounts; first rides must succeed.
+  - Network effects are weak and local; competitors can copy features, so
+    execution (reliability, density, support) is the moat.
+
+15.5 TRUST AND SAFETY (non-negotiable, not a later phase)
+  - Verified identities and documents (drivers) with periodic re-verification;
+    vehicle checks; background/police verification as the law and policy require.
+  - In-trip protections (SOS, share trip, deviation alerts, trip PIN, masked
+    calls), post-trip reporting, and a staffed incident process with severity,
+    escalation, evidence preservation, and links to authorities.
+  - Abuse and fraud controls: OTP abuse, fake accounts, GPS spoofing, collusion
+    (rides faked for incentives), payment fraud, promo abuse, chargebacks.
+  - Clear policies (cancellation, conduct, refunds) shown in-app; consistent
+    enforcement with appeal paths; every privileged action audited.
+
+15.6 PAYMENTS AND FINANCE
+  - Every rupee traceable: immutable double-entry ledger, one fare snapshot per
+    trip, idempotent provider events, reconciliation against provider settlement
+    reports AND against bank statements, cash-commission balances per driver.
+  - Clear money flows: who collects, who owes whom, when payouts run, how refunds
+    and chargebacks reverse entries, how taxes are applied and reported.
+  - Operational finance: daily close, discrepancy queues with owners and SLAs,
+    dual approval for adjustments, exports for accountants and auditors.
+  - Provider resilience: timeouts, retries, circuit breakers, degraded states that
+    never lose or double-charge money.
+
+15.7 OPERATIONS AND SUPPORT
+  - A real operations team and tools: driver verification desk, live trip
+    monitoring, stuck-ride alerts, support queues with SLAs, safety desk, finance
+    desk, community/driver relations. Staffed hours matching service hours.
+  - Runbooks for incidents (outage, payment provider down, mass cancellation,
+    safety event), on-call rotations, postmortems.
+  - Feedback loops: ratings, complaints, driver surveys, trip audits, weekly
+    metric reviews, rapid policy iteration.
+
+15.8 TECHNOLOGY QUALITIES
+  - Correctness first: no double assignment, no duplicate charges, no lost state;
+    the database enforces invariants; retries are safe. (This project's core
+    strength.)
+  - Reliability: graceful degradation (apps resync after bad networks), health
+    checks, alerts, tested backups/restores, rollback, zero-downtime deploys.
+  - Performance: snappy API (p95 in the hundreds of ms), fast matching (seconds),
+    low-latency location updates, efficient on low-end phones and slow data.
+  - Mobile quality: crash-free sessions >99.5% target, battery-efficient location,
+    background reliability, small bundle, offline-tolerant UX, accessibility.
+  - Security and privacy by design: least privilege, MFA for staff, secrets
+    management, encrypted transport, data minimisation, retention and deletion,
+    audit trails, regular testing.
+  - Observability: metrics, logs with request IDs, traces, dashboards for both
+    system health and business health; alerting tied to runbooks.
+  - Evolvability: modular monolith now; extract services (matching, location,
+    payments) only when measured bottlenecks justify it; contracts versioned;
+    feature flags and staged rollouts; experimentation for pricing/incentives.
+
+15.9 METRICS A SUCCESSFUL OPERATION WATCHES (indicative targets)
+  Marketplace  : request-to-match rate (>90% when supply exists), median/p95 match
+                 time, pickup ETA (single-digit minutes), acceptance rate, rider and
+                 driver cancellation rates (often 10-20% and falling), completed
+                 trips per driver-hour, driver utilisation, supply/demand ratio by
+                 area and hour, no-driver-found rate.
+  Quality      : average rating, repeat-rider rate (D7/D30), complaints per 1,000
+                 trips, safety incidents per 100,000 trips and time-to-resolve,
+                 refund rate, fare disputes.
+  Finance      : GMV, net revenue/take rate, contribution margin per trip, payment
+                 success rate, cash share and cash-commission arrears, reconciliation
+                 breaks and ageing, refund/chargeback rate, cost per trip (maps,
+                 SMS, payments, support).
+  Supply health: new-driver activation time, active drivers/week, retention,
+                 earnings per hour, payout timeliness.
+  Technology   : API/socket latency and error rates, crash-free sessions, outbox/
+                 worker backlog, provider error rates, deploy frequency, MTTR.
+
+15.10 INDIA- AND NAGPUR-SPECIFIC CONSIDERATIONS (verify each)
+  - Vehicle mix: auto-rickshaws dominate short urban trips; cabs, bike-taxis and
+    e-rickshaws have different rules and demand. Category-by-category legality
+    and permits vary by state; some states restrict or regulate bike-taxis.
+  - Regulation: central and Maharashtra aggregator guidelines/licensing, fare
+    bands and surge caps, minimum driver share of fare, cancellation-fee limits,
+    insurance and driver-training expectations, safety requirements; data
+    protection law (DPDP Act 2023 and its rules; check current status);
+    consumer protection; GST on passenger transport and on platform fees;
+    payments regulation (RBI rules for payment aggregators/UPI); SMS sender
+    registration. This PRD correctly demands legal review before launch.
+  - Payments reality: UPI is ubiquitous but cash remains large; drivers often
+    prefer cash for same-day liquidity; UPI flows (intent apps, QR, collect)
+    differ in success rates; reconciliation of cash commission needs discipline.
+  - Competition and models: incumbents (Uber, Ola, Rapido) and newer zero-/low-
+    commission or subscription-style driver-owned/ONDC-linked models (e.g. Namma
+    Yatri-style) have reset driver expectations; a commission cut that is higher
+    than rivals will make supply scarce. Decide the model deliberately.
+  - Devices and networks: many users are on low/mid-range Android, intermittent
+    4G, and aggressive OEM battery management that kills background apps: this is
+    why background-location reliability and push notifications matter so much.
+  - Language and literacy: Hindi/Marathi UI, voice or icon-led flows for drivers,
+    simple wording, large touch targets.
+  - Local operations: strong relationships with auto unions/stands, clear
+    communication with RTO/police where needed, visible on-ground driver support.
+
+15.11 DIFFERENTIATION OPTIONS FOR A LOCAL ENTRANT
+  Fair driver economics (lower or flat fees, fast payouts); local-language and
+  low-end-device excellence; reliable cash+UPI handling; safety-first features
+  executed well for women riders; transparent pricing; strong local support;
+  partnerships (hospitals, colleges, stations, employers); neighbourhood-level
+  service guarantees; later: pre-booked airport/station rides, scheduled rides,
+  corporate accounts, delivery of parcels using idle capacity (a PRD non-goal now).
+
+15.12 WHAT "DONE" LOOKS LIKE AT EACH LAUNCH STAGE
+  Internal validation (Phase A): all P0 acceptance criteria pass on staging with
+    real devices and sandbox providers; drills for incident response and backup
+    restore completed; zone and fares validated with operations.
+  Closed pilot (Phase B): bounded zone, small vetted driver cohort and invited
+    riders, staff monitoring during hours, every trip reconciled, daily metric
+    review; routine exceptions resolved WITHOUT engineering.
+  Expansion (Phase C): measured cohort growth, coverage widened only when pickup
+    performance and availability hold, support/safety volumes sustainable,
+    rollback paths for app and backend, pre-agreed gates met.
+  Sustainable operation: positive or planned unit economics, stable driver supply
+    and retention, low incident rates, clean books, monitored systems, a team that
+    can run it day to day.
+
+15.13 ANTI-PATTERNS AND FAILURE MODES (many appear in the PRD's risk list)
+  Launching citywide with thin supply; trusting client payment callbacks; Redis as
+  the only assignment lock; mutable balance fields instead of a ledger; letting
+  clients set trip status; ignoring cash reconciliation; no staffed safety desk;
+  skipping legal review; building surge before reliability; discount-driven demand
+  without supply; unverified background-location assumptions; no rollback plan;
+  declaring readiness because screens exist; hidden fees; ignoring driver
+  earnings; no monitoring so problems are found by angry users.
+
+15.14 SCORECARD: THIS PROJECT AGAINST THE ABOVE (qualitative)
+  Correctness of dispatch/state/money ....... STRONG  (DB-enforced, heavily tested)
+  Realtime resilience (resync, dedupe) ...... STRONG  (tested; not on devices)
+  Payment architecture (idempotency, recon).. STRONG  (fake provider only)
+  Staff tooling basics (roles, audit) ....... GOOD    (no safety/support/pricing)
+  Rider UX .................................. BASIC   (works; no map/search/safety)
+  Driver UX ................................. BASIC   (works; no docs/earnings/background)
+  Marketplace levers ........................ NONE    (no incentives, surge, promos)
+  Trust and safety .......................... MINIMAL (no SOS/share/PIN/incidents)
+  Operations/support tooling ................ MINIMAL (no tickets, live map)
+  Security hardening ........................ PARTIAL (no rate limit/MFA/scans)
+  Observability and delivery ................ NONE    (no CI/CD, metrics, alerts)
+  Real-world verification ................... NONE    (no device/browser/provider)
+  Legal/compliance .......................... NONE
+  Net: a solid engine without the vehicle around it. The remaining work is less
+  about clever algorithms and more about integrations, safety, operations,
+  verification on real devices, and the business decisions in section 14.
+
+
+================================================================================
+16. RECOMMENDED NEXT STEPS (ORDERED)
+================================================================================
+Follows the PRD's own direction (verify and harden the engine, then wrap it).
+Each step ends with automated evidence; do not move on while the previous step's
+tests are red.
+
+ 0. BASELINE: unzip, install, start Postgres, run every suite on both backends,
+    typecheck, build console + both apps. Record the numbers. Fix any drift.
+ 1. CONTRACTS FIRST: write the OpenAPI spec for all existing endpoints; generate/
+    share types into the clients (shared contracts + validation packages);
+    add a CI check that fails on drift. Align endpoint names with the PRD where
+    cheap (document the rest).
+ 2. DELIVERY SPINE: Dockerfiles, compose, environments, CI pipeline (lint, types,
+    tests on Postgres, scans, migration checks, builds), health/readiness
+    endpoints, structured logging with request-id propagation + redaction.
+ 3. SECURITY HARDENING: rate limiting (per IP/account/endpoint), webhook
+    throttling, staff MFA (TOTP/WebAuthn), secure headers on the API, secrets
+    handling, retention jobs, missing FKs, refund idempotency keys, location rate
+    limit, int4 -> bigint for location sequence.
+ 4. FINISH THE DOMAIN: cancellation policy + fees; pickup checks (PIN/proximity);
+    cash collection workflow + driver balances; earnings and payouts model;
+    PricingRule + ServiceZone tables with PostGIS polygon and admin UI; Vehicle
+    and driver-document model; ratings; receipts.
+ 5. SAFETY AND SUPPORT: SOS, share-trip, incidents (restricted access, severity,
+    escalation), support tickets with trip linkage and staff queues, notifications
+    (push) for all critical events.
+ 6. MAPS: geocoding/autocomplete, routing ETA in quotes and dispatch, map screens
+    (live tracking, pin placement), then dispatch metrics and radius expansion.
+ 7. REAL PROVIDERS (needs owner decisions/credentials): payment gateway adapter
+    validated against its sandbox, SMS/OTP adapter, push, object storage. Keep the
+    fake providers for tests.
+ 8. DEVICE REALITY: development builds via EAS; run on physical Android devices;
+    implement background location; test lock/kill/battery/GPS-loss/data-loss;
+    fix what breaks; add crash reporting.
+ 9. OBSERVABILITY AND SCALE: metrics, dashboards, alerts, runbooks; Redis where
+    justified (Socket.IO adapter, rate limits, presence); load and failure
+    injection tests at a declared baseline; backup/restore and rollback drills.
+10. PILOT READINESS: go/no-go checklist evidence (PRD 17.1), staffing and
+    operating procedures, legal sign-offs, Phase A internal validation.
+
+
+================================================================================
+17. RUN / DEPLOY CHEAT SHEET
+================================================================================
+Prerequisites: Node 22+, PostgreSQL 16 with PostGIS, npm.
+Database (dev):
+  createuser/superuser ride (password ride); createdb ride_dev; CREATE EXTENSION
+  postgis happens in migration 0001 (needs superuser or a pre-installed extension).
+Backend:
+  npm install
+  DATABASE_URL=postgres://ride:ride@localhost:5432/ride_dev \
+  ACCESS_TOKEN_SIGNING_KEY=$(openssl rand -hex 32) \
+  ADMIN_PHONES="+919000000002:SUPPORT,+919000000005:OPS_ADMIN,+919000000003:FINANCE_ADMIN,+919000000004:SUPER_ADMIN" \
+  ENABLE_DEV_TOOLS=1 PORT=3000 npm start
+  -> applies migrations, starts workers, mounts /console if built. In dev the OTP
+     is printed to the server console as "[dev] OTP for +91...: 123456".
+  npm run migrate            # migrations only
+Staff console:
+  cd mobile && npm install && npm run build:admin   # then open /console on the API
+Mobile apps:
+  cd mobile && npm install
+  EXPO_PUBLIC_API_URL=http://<your-LAN-IP>:3000 npm run rider    # or: npm run driver
+  (Android emulator reaches the host at http://10.0.2.2:3000. Cleartext HTTP needs
+   a dev build config; production must be https.)
+Tests: see section 9.1. Live checks: apps/api/scripts/smoke.ts and smoke-pay.ts.
+Production: the API refuses to start (NODE_ENV=production) until a real payment
+provider and OTP provider are implemented and wired.
+
+
+================================================================================
+18. GLOSSARY
+================================================================================
+Aggregator    A platform connecting riders and independent drivers (regulated
+              in India; verify current rules).
+AC-nn         PRD acceptance scenario number.
+Assignment    The single active link between a ride and its driver.
+Capture       The provider confirming that money was actually received.
+Compensating  A new ledger entry that reverses an earlier one instead of editing.
+entry
+DLT           Indian telecom registration for transactional SMS (verify).
+Dispatch      Choosing which driver to offer a ride to, and managing the offer.
+Duplicate     A second payment for a ride that is already paid; refunded.
+capture
+GMV           Gross merchandise value: total fares booked.
+Idempotency   Repeating a request has no extra effect (same key = same result).
+Intent (UPI)  A deep link that opens the rider's UPI app with payment details.
+Ledger        Append-only double-entry record of money movements.
+Liquidity     Having enough nearby supply that requests are matched quickly.
+Multi-homing  Drivers working on several apps at once.
+Offer         A time-limited invitation for one driver to take a ride.
+Outbox        Table of events written in the same transaction as the change they
+              describe, relayed to consumers afterwards.
+Paise         1/100 rupee; all money is stored as integer paise.
+Presence      The driver's latest online state and location.
+Reconcile     Compare our records with the provider's/bank's and resolve breaks.
+Sweep         Worker pass that advances timed-out offers.
+Take rate     Share of the fare kept by the platform (commission).
+UPI           India's instant bank-to-bank payment system.
+
+
+================================================================================
+19. BUILD-ENVIRONMENT NOTES (FOR REPRODUCIBILITY)
+================================================================================
+- The work was done in a Linux sandbox (Ubuntu 24). PostgreSQL 16 and PostGIS 3.4
+  were installed with apt (after `apt-get update`) and started with
+  `pg_ctlcluster 16 main start`; the cluster did NOT survive between some tool
+  calls and had to be restarted. Test DB: ride_test (user ride / password ride).
+- npm registry access worked; Prisma's engine host and Expo's API host were not on
+  the sandbox allow-list (hence no Prisma; Expo versions were read from
+  expo/bundledNativeModules.json).
+- `pkill -f "<pattern>"` inside a command whose own text contains the pattern kills
+  the calling shell: track server PIDs instead.
+- No physical device, emulator, or real browser was available: UI verification used
+  react-native-web + jsdom + Testing Library; bundle verification used
+  `expo export` for web/android/ios and `vite build`.
+- Date context: written 24 Oct 2026. Library versions: see section 4.
+
+================================================================================
+END OF CONTEXT FILE
+================================================================================

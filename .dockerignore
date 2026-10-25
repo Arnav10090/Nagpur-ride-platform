@@ -1,0 +1,10 @@
+node_modules
+mobile/node_modules
+mobile/apps/rider
+mobile/apps/driver
+.git
+.env
+*.md
+docs/
+install-postgis.bat
+postgis-install-done.txt

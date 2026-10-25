@@ -1,0 +1,2 @@
+{ "name": "@rides/expo-platform", "version": "0.1.0", "private": true, "type": "module", "main": "src/index.ts", "types": "src/index.ts",
+  "dependencies": { "@rides/client": "*" }, "peerDependencies": { "expo-location": "*", "expo-secure-store": "*", "react-native": "*" } }

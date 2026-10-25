@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  backend:
+    name: Backend (typecheck + tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: ride
+          POSTGRES_PASSWORD: ride
+          POSTGRES_DB: ride_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ride -d ride_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests (memory + Postgres)
+        run: npm run test:pg
+        env:
+          TEST_DATABASE_URL: postgres://ride:ride@localhost:5432/ride_test
+
+  mobile:
+    name: Mobile (typecheck + tests + admin build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+
+      - run: npm ci
+      - run: cd mobile && npm ci
+
+      - name: Mobile typecheck
+        run: cd mobile && npm run typecheck
+
+      - name: Mobile tests
+        run: cd mobile && npx vitest run
+
+      - name: Admin console build
+        run: cd mobile && npm run build:admin
+
+  migration-check:
+    name: Migration idempotency
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: ride
+          POSTGRES_PASSWORD: ride
+          POSTGRES_DB: ride_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ride -d ride_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run migrations (first pass)
+        run: npm run migrate
+        env:
+          DATABASE_URL: postgres://ride:ride@localhost:5432/ride_test
+
+      - name: Run migrations (second pass — must be idempotent)
+        run: npm run migrate
+        env:
+          DATABASE_URL: postgres://ride:ride@localhost:5432/ride_test

@@ -1,0 +1,37 @@
+// REFERENCE ONLY. The source of truth is apps/api/migrations/*.sql (applied by apps/api/src/pg/migrate.ts). Not kept in sync.
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+
+enum RideStatus { REQUESTED SEARCHING DRIVER_ASSIGNED DRIVER_ARRIVING DRIVER_ARRIVED IN_PROGRESS COMPLETED CANCELLED EXPIRED }
+enum OfferStatus { PENDING ACCEPTED REJECTED EXPIRED INVALIDATED }
+enum AssignmentStatus { ACTIVE ENDED }
+enum PaymentMethod { UPI CASH }
+enum PaymentStatus { NOT_REQUIRED PENDING REQUIRES_ACTION AUTHORIZED COLLECTION_PENDING SUCCEEDED FAILED CANCELLED PARTIALLY_REFUNDED REFUNDED }
+enum Direction { DEBIT CREDIT }
+enum Role { RIDER DRIVER SUPPORT OPS_ADMIN FINANCE_ADMIN SUPER_ADMIN }
+
+model User { id String @id @default(uuid()) phone String @unique role Role status String @default("ACTIVE") createdAt DateTime @default(now())
+  driver Driver? rides Ride[] }
+model Driver { id String @id @default(uuid()) userId String @unique user User @relation(fields: [userId], references: [id])
+  verificationStatus String @default("PENDING") availabilityStatus String @default("OFFLINE") vehicles Vehicle[] }
+model Vehicle { id String @id @default(uuid()) driverId String driver Driver @relation(fields: [driverId], references: [id])
+  category String registrationNumber String @unique status String @default("PENDING") }
+model ServiceZone { id String @id name String status String @default("INACTIVE") timezone String @default("Asia/Kolkata") /// boundary geometry added in raw SQL migration
+}
+model PricingRule { id String @id @default(uuid()) zoneId String category String version Int effectiveFrom DateTime baseMinor Int perKmMinor Int perMinMinor Int minimumMinor Int cancellationFeeMinor Int commissionBps Int
+  @@unique([zoneId, category, version]) }
+model FareQuote { id String @id @default(uuid()) riderId String zoneId String currency String @default("INR") totalMinor Int breakdown Json expiresAt DateTime }
+model Ride { id String @id @default(uuid()) riderId String rider User @relation(fields: [riderId], references: [id])
+  status RideStatus stateVersion Int @default(1) fareQuoteId String finalFareMinor Int? paymentMethod PaymentMethod createdAt DateTime @default(now())
+  assignments RideAssignment[] offers RideOffer[] events RideEvent[] @@index([riderId, createdAt]) @@index([status]) }
+model RideAssignment { id String @id @default(uuid()) rideId String ride Ride @relation(fields: [rideId], references: [id]) driverId String status AssignmentStatus @default(ACTIVE) }
+model RideOffer { id String @id @default(uuid()) rideId String ride Ride @relation(fields: [rideId], references: [id]) driverId String sequenceNumber Int dispatchAttemptId String
+  status OfferStatus @default(PENDING) createdAt DateTime @default(now()) expiresAt DateTime respondedAt DateTime? }
+model RideEvent { id String @id @default(uuid()) rideId String ride Ride @relation(fields: [rideId], references: [id]) type String stateVersion Int payload Json createdAt DateTime @default(now()) }
+model DriverLocation { id String @id @default(uuid()) driverId String lat Float lng Float accuracyMeters Float sequence Int recordedAt DateTime receivedAt DateTime @default(now()) @@index([driverId, receivedAt]) }
+model Payment { id String @id @default(uuid()) rideId String method PaymentMethod status PaymentStatus amountMinor Int currency String @default("INR") providerRef String? }
+model PaymentEvent { id String @id @default(uuid()) provider String providerEventId String paymentId String payload Json receivedAt DateTime @default(now()) }
+model LedgerEntry { id String @id @default(uuid()) transactionId String account String direction Direction amountMinor Int createdAt DateTime @default(now()) @@index([transactionId]) @@index([account]) }
+model IdempotencyRecord { id String @id @default(uuid()) scope String key String resourceId String createdAt DateTime @default(now()) }
+model AuditLog { id String @id @default(uuid()) actorId String action String targetType String targetId String reason String? before Json? after Json? createdAt DateTime @default(now()) }
+model OutboxEvent { id String @id @default(uuid()) aggregateId String type String payload Json deliveryStatus String @default("PENDING") attempts Int @default(0) createdAt DateTime @default(now()) @@index([deliveryStatus, createdAt]) }

@@ -1,0 +1,1 @@
+{ "extends": "../../tsconfig.base.json", "compilerOptions": { "types": ["node"], "experimentalDecorators": true, "useDefineForClassFields": false }, "include": ["src", "test", "vite.config.ts"] }

@@ -1,0 +1,5 @@
+{ "expo": { "name": "Nagpur Rides Driver", "slug": "nagpur-rides-driver", "version": "0.1.0", "orientation": "portrait", "userInterfaceStyle": "light", "scheme": "nagpurridesdriver",
+  "ios": { "bundleIdentifier": "com.example.nagpurrides.driver", "supportsTablet": false },
+  "android": { "package": "com.example.nagpurrides.driver", "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"] },
+  "plugins": [["expo-location", { "locationWhenInUsePermission": "Nagpur Rides Driver shares your location with riders and uses it to match you with nearby trips." }], "expo-secure-store"],
+  "web": { "bundler": "metro", "output": "single" } } }
